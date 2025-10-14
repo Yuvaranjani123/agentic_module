@@ -20,15 +20,25 @@ A comprehensive Retrieval-Augmented Generation (RAG) system for insurance docume
 
 ## Features
 
+### Core Features
 - **PDF Processing**: Automated table and text extraction with intelligent merging
 - **Human-in-the-Loop**: Manual review for table extraction accuracy
 - **Semantic Chunking**: Intelligent text chunking using cosine similarity and embeddings
 - **Vector Storage**: ChromaDB for efficient similarity search and persistence
 - **REST API**: Clean separation between backend and frontend with comprehensive logging
 - **Azure OpenAI**: Integration with Azure OpenAI for embeddings and chat completion
-- **Comprehensive Logging**: Structured logging across all components for debugging and monitoring
-- **Error Handling**: Robust error handling with detailed logging and user-friendly messages
-- **Configurable Prompts**: Centralized prompt configuration for consistent AI responses
+
+### New Enhanced Features
+- **Document Type Classification**: Categorize documents as Policy, Brochure, Prospectus, or Terms & Conditions during ingestion
+- **Advanced Document Filtering**: Filter search results by document type for more relevant answers
+- **Real-Time Evaluation Metrics**: Comprehensive retrieval quality assessment including:
+  - Term Coverage Analysis
+  - Query Coverage Metrics
+  - Semantic Similarity Scoring
+  - Result Diversity Measurement
+- **Streamlined Single Interface**: Unified retrieval interface with real-time metrics (dashboard removed for simplicity)
+- **Enhanced Error Handling**: Robust error handling for edge cases including empty results and evaluation failures
+- **Improved User Experience**: Auto-enabled evaluation with clear feedback and sample queries
 
 ## Prerequisites
 
@@ -113,19 +123,27 @@ streamlit run frontend/retrieval_run.py --server.port 8502
 ### 1. Document Ingestion (Port 8501)
 
 1. **Upload PDF**: Upload your insurance document (auto-detects output directory)
-2. **Analysis**: Automatic table detection and content analysis
-3. **Extraction**: Extract tables (CSV) and text content
-4. **Review**: Human-in-the-loop table verification with editable mapping (if tables found)
-5. **Processing**: Chunk content and generate embeddings using Azure OpenAI
-6. **Storage**: Store in ChromaDB under `media/output/chroma_db/[document_name]/`
+2. **Document Type Selection**: Choose document type (Policy Document, Brochure, Prospectus, Terms & Conditions)
+3. **Analysis**: Automatic table detection and content analysis
+4. **Extraction**: Extract tables (CSV) and text content
+5. **Review**: Human-in-the-loop table verification with editable mapping (if tables found)
+6. **Processing**: Chunk content and generate embeddings using Azure OpenAI with document type tagging
+7. **Storage**: Store in ChromaDB under `media/output/chroma_db/[document_name]/` with metadata
 
 ### 2. Document Retrieval (Port 8502)
 
 1. **Auto-Detection**: Automatically detects available ChromaDB collections
 2. **Selection**: Choose which document collection to query
-3. **Query**: Ask questions about your document with sample queries provided
-4. **Search**: Semantic search through embedded content with configurable result count
-5. **Answer**: AI-generated responses with detailed source citations and metadata
+3. **Document Type Filtering**: Filter results by document type (Policy, Brochure, Prospectus, Terms)
+4. **Evaluation Settings**: Enable real-time retrieval evaluation (enabled by default)
+5. **Query**: Ask questions about your document with sample queries provided
+6. **Search**: Semantic search through embedded content with configurable result count
+7. **Answer**: AI-generated responses with detailed source citations and metadata
+8. **Real-Time Metrics**: View evaluation metrics including:
+   - Term Coverage (percentage of query terms found)
+   - Query Coverage and Diversity scores
+   - Semantic similarity scores for each source
+   - Covered terms analysis
 
 ## API Endpoints
 
@@ -197,7 +215,8 @@ curl -X POST http://localhost:8000/api/chunk_and_embed/ \
   -H "Content-Type: application/json" \
   -d '{
     "output_dir": "/path/to/extracted/content",
-    "chroma_db_dir": "/path/to/chroma/database"
+    "chroma_db_dir": "/path/to/chroma/database",
+    "doc_type": "policy"
   }'
 ```
 
@@ -221,7 +240,9 @@ curl -X POST http://localhost:8000/retriever/query/ \
   -d '{
     "query": "What does the insurance policy cover for hospital expenses?",
     "chroma_db_dir": "/path/to/chroma/database",
-    "k": 5
+    "k": 5,
+    "doc_type": "policy",
+    "evaluate": true
   }'
 ```
 
@@ -236,10 +257,19 @@ curl -X POST http://localhost:8000/retriever/query/ \
       "table": null,
       "row_index": null,
       "type": "text",
+      "doc_type": "policy",
       "chunking_method": "semantic",
       "chunk_idx": 42
     }
-  ]
+  ],
+  "evaluation": {
+    "term_coverage": 0.85,
+    "query_coverage": 0.92,
+    "diversity": 0.78,
+    "avg_semantic_similarity": 0.834,
+    "covered_terms": ["hospital", "expenses", "coverage"],
+    "semantic_similarities": [0.89, 0.82, 0.79]
+  }
 }
 ```
 
@@ -282,31 +312,32 @@ rag_module_1/
 │   │   └── wsgi.py           # WSGI application
 │   ├── config/                # Configuration files
 │   │   └── prompt_config.py  # AI prompt templates
+│   ├── evaluation/            # NEW: Evaluation metrics module
+│   │   ├── __init__.py       # Package initialization
+│   │   └── metrics.py        # Retrieval evaluation metrics
 │   ├── logs/                  # Logging utilities
 │   │   ├── __init__.py       # Package initialization
 │   │   └── utils.py          # Logging setup and configuration
 │   ├── ingestion/             # PDF processing app
-│   │   ├── views.py          # API endpoints with logging
+│   │   ├── views.py          # API endpoints with document type support
 │   │   ├── utils.py          # Processing utilities with logging
-│   │   ├── service.py        # Core chunking and embedding logic
+│   │   ├── service.py        # Core chunking and embedding with doc types
 │   │   ├── models.py         # Data models
 │   │   └── urls.py           # URL routing
 │   ├── retriever/             # Document retrieval app
-│   │   ├── views.py          # Query endpoints with logging
+│   │   ├── views.py          # Query endpoints with filtering & evaluation
 │   │   └── urls.py           # URL routing
 │   ├── manage.py             # Django management
 │   └── db.sqlite3            # SQLite database
 ├── frontend/                   # Streamlit UIs
-│   ├── ingestion_run.py      # Document processing UI
-│   └── retrieval_run.py      # Document query UI
+│   ├── ingestion_run.py      # Document processing UI with doc type selection
+│   └── retrieval_run.py      # Document query UI with evaluation metrics
 ├── media/                      # File storage
 │   ├── input/                # Uploaded PDFs
 │   └── output/               # Processed files & ChromaDB
 ├── venv/                      # Python virtual environment
-├── .env                       # Environment variables
 ├── .env.example              # Environment template
 ├── requirements.txt          # Python dependencies
-├── FLOW_SUMMARY.md           # Project documentation
 └── README.md                 # This file
 ```
 
@@ -412,14 +443,6 @@ The application includes comprehensive logging across all components:
 1. **Backend**: Add new views in respective Django apps
 2. **Frontend**: Create new Streamlit components
 3. **API**: Update URL routing and add CORS origins
-
-### Testing
-
-```bash
-# Test individual components
-python backend/ingestion/utils.py
-python backend/retriever/views.py
-```
 
 ## License
 

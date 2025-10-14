@@ -20,12 +20,14 @@ except ImportError:
 
 class ChunkerEmbedder:
     def __init__(self, azure_endpoint: str, azure_api_key: str, azure_api_version: str,
-                 embedding_model: str, chroma_persist_dir: str, semantic_threshold: float = 0.75):
+                 embedding_model: str, chroma_persist_dir: str, semantic_threshold: float = 0.75, 
+                 doc_type: str = "unknown"):
         """
         Initialize the ChunkerEmbedder with Azure OpenAI and ChromaDB settings.
         
         Args:
             semantic_threshold: Cosine similarity threshold for semantic chunking (0-1)
+            doc_type: Document type for metadata (policy, brochure, prospectus, terms)
         """
         # Initialize Azure OpenAI embeddings via LangChain wrapper
         self.client = AzureOpenAIEmbeddings(
@@ -37,6 +39,7 @@ class ChunkerEmbedder:
         )
         self.embedding_model = embedding_model
         self.semantic_threshold = semantic_threshold
+        self.doc_type = doc_type  # Store document type for metadata
 
         # Initialize ChromaDB
         self.chroma_client = chromadb.PersistentClient(path=chroma_persist_dir)
@@ -82,8 +85,14 @@ class ChunkerEmbedder:
         logger.debug(f"Split text into {len(clean_sentences)} sentences")
         return clean_sentences
 
-    def semantic_chunk_text(self, text: str, max_chunk_size: int = 1000) -> List[str]:
-        """Apply semantic chunking to text using embeddings."""
+    def semantic_chunk_text(self, text: str, max_chunk_size: int = 1000, overlap_sentences: int = 2) -> List[str]:
+        """Apply semantic chunking to text using embeddings with overlap for context continuity.
+        
+        Args:
+            text: Input text to chunk
+            max_chunk_size: Maximum size of each chunk
+            overlap_sentences: Number of sentences to overlap between chunks for context continuity
+        """
         if cosine_similarity is None:
             print("Warning: scikit-learn not available. Falling back to simple chunking.")
             logger.warning("scikit-learn not available. Falling back to simple chunking.")
@@ -115,10 +124,11 @@ class ChunkerEmbedder:
             sim = cosine_similarity([embeddings[i]], [embeddings[i + 1]])[0][0]
             similarities.append(sim)
         
-        # Find semantic boundaries (where similarity drops below threshold)
+        # Find semantic boundaries with overlap for context continuity
         chunks = []
         current_chunk_sentences = [sentences[0]]
         current_chunk_size = len(sentences[0])
+        overlap_buffer = []  # Buffer for overlap sentences
         
         for i, sim in enumerate(similarities):
             next_sentence = sentences[i + 1]
@@ -133,8 +143,14 @@ class ChunkerEmbedder:
             if should_split and current_chunk_sentences:
                 # Finish current chunk
                 chunks.append(' '.join(current_chunk_sentences))
-                current_chunk_sentences = [next_sentence]
-                current_chunk_size = next_sentence_size
+                
+                # Prepare overlap buffer with last N sentences for context continuity
+                overlap_size = min(overlap_sentences, len(current_chunk_sentences))
+                overlap_buffer = current_chunk_sentences[-overlap_size:] if overlap_size > 0 else []
+                
+                # Start new chunk with overlap + new sentence
+                current_chunk_sentences = overlap_buffer + [next_sentence]
+                current_chunk_size = sum(len(s) for s in current_chunk_sentences)
             else:
                 # Add to current chunk
                 current_chunk_sentences.append(next_sentence)
@@ -143,7 +159,8 @@ class ChunkerEmbedder:
         # Add final chunk
         if current_chunk_sentences:
             chunks.append(' '.join(current_chunk_sentences))
-        logger.info(f"Semantic chunking produced {len(chunks)} chunks")
+        
+        logger.info(f"Semantic chunking with {overlap_sentences}-sentence overlap produced {len(chunks)} chunks")
         return chunks if chunks else [text]
 
     def chunk_text_files(self, output_dir: str) -> List[Dict[str, Any]]:
@@ -205,6 +222,7 @@ class ChunkerEmbedder:
                             "text": semantic_chunk.strip(),
                             "metadata": {
                                 "type": "text",
+                                "doc_type": self.doc_type,  # Add document type
                                 "page_num": page_num,
                                 "source_file": fname,
                                 "chunk_idx": f"{idx}_{sem_idx}",
@@ -219,6 +237,7 @@ class ChunkerEmbedder:
                         "text": para.strip(),
                         "metadata": {
                             "type": "text",
+                            "doc_type": self.doc_type,  # Add document type
                             "page_num": page_num,
                             "source_file": fname,
                             "chunk_idx": idx,
@@ -232,6 +251,7 @@ class ChunkerEmbedder:
                 "text": carryover_heading.strip(),
                 "metadata": {
                     "type": "text",
+                    "doc_type": self.doc_type,  # Add document type
                     "page_num": page_num,
                     "source_file": fname,
                     "chunk_idx": 999,
@@ -255,6 +275,7 @@ class ChunkerEmbedder:
                         "text": header_text,
                         "metadata": {
                             "type": "table_header",
+                            "doc_type": self.doc_type,  # Add document type
                             "table_file": fname,
                             "row_idx": -1,
                             "total_rows": len(df)
@@ -267,6 +288,7 @@ class ChunkerEmbedder:
                             "text": row_text,
                             "metadata": {
                                 "type": "table_row",
+                                "doc_type": self.doc_type,  # Add document type
                                 "table_file": fname,
                                 "row_idx": idx,
                                 "total_rows": len(df),

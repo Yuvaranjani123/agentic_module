@@ -19,7 +19,7 @@ DJANGO_API = os.getenv("API_BASE")
 
 
 @st.cache_resource
-def get_cached_chunker_embedder(chroma_db_dir: str, output_dir: str):
+def get_cached_chunker_embedder(chroma_db_dir: str, output_dir: str, doc_type: str = "unknown"):
     """Cached function to call Django API for chunking and embedding."""
     try:
         from dotenv import load_dotenv
@@ -28,7 +28,7 @@ def get_cached_chunker_embedder(chroma_db_dir: str, output_dir: str):
         # Call Django API for chunking and embedding
         resp = requests.post(
             f"{DJANGO_API}/api/chunk_and_embed/",
-            json={"output_dir": output_dir, "chroma_db_dir": chroma_db_dir}
+            json={"output_dir": output_dir, "chroma_db_dir": chroma_db_dir, "doc_type": doc_type}
         )
         
         if resp.status_code == 200:
@@ -176,9 +176,9 @@ class StreamlitRAGPipeline:
             return []
         return [f for f in os.listdir(self.output_dir) if f.endswith(".csv") and f != "table_file_map.csv"]
     
-    def chunk_and_embed(self):
+    def chunk_and_embed(self, doc_type: str = "unknown"):
         """Run chunking and embedding process via Django API."""
-        result = get_cached_chunker_embedder(self.chroma_db_dir, self.output_dir)
+        result = get_cached_chunker_embedder(self.chroma_db_dir, self.output_dir, doc_type)
         
         if result["success"]:
             # Create a mock chunker object to maintain compatibility
@@ -239,10 +239,43 @@ def main():
             help="Upload the PDF document you want to process"
         )
         
+        # Document Type Selection
+        st.subheader("🏷️ Document Type")
+        doc_type_options = {
+            "Policy Document": "policy",
+            "Brochure": "brochure", 
+            "Prospectus": "prospectus",
+            "Terms & Conditions": "terms"
+        }
+        selected_doc_type_label = st.selectbox(
+            "Select Document Type",
+            options=list(doc_type_options.keys()),
+            help="Choose the type of document for better categorization and filtering"
+        )
+        selected_doc_type = doc_type_options[selected_doc_type_label]
+        
         # Auto-detect output directory (hidden from user)
         current_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(current_dir)  # Go up from frontend to project root
         base_output_dir = os.path.join(project_root, "media", "output")
+        
+        # Chunking Configuration
+        st.subheader("🧩 Enhanced Chunking")
+        st.info("""
+        **New Features:**
+        - ✅ **Semantic Chunking**: AI-powered content-aware splitting
+        - ✅ **Context Overlap**: Maintains continuity between chunks
+        - ✅ **Document Type Detection**: Insurance-specific processing
+        - ✅ **Evaluation Metrics**: Quality assessment included
+        """)
+        
+        with st.expander("📊 Chunking Details"):
+            st.write("""
+            - **Overlap Strategy**: 2-sentence overlap for context continuity
+            - **Semantic Threshold**: 0.75 similarity for boundary detection  
+            - **Max Chunk Size**: 1000 characters with intelligent splitting
+            - **Domain-Aware**: Optimized for insurance documents
+            """)
         
         # Azure OpenAI Status
         st.subheader("🔑 Azure OpenAI Status")
@@ -556,9 +589,9 @@ def main():
                     st.error("🚫 **Cannot proceed:** No content extracted. Please complete Step 2 first.")
                     disable_chunking = True
                 
-                if st.button("�🚀 Start Chunking & Embedding", type="primary", disabled=disable_chunking):
+                if st.button("🚀 Start Chunking & Embedding", type="primary", disabled=disable_chunking):
                     with st.spinner("Processing chunks and generating embeddings..."):
-                        chunker, message = pipeline.chunk_and_embed()
+                        chunker, message = pipeline.chunk_and_embed(selected_doc_type)
                         
                         if chunker:
                             st.success(message)
@@ -580,63 +613,63 @@ def main():
                             st.error(message)
                 
                 # Step 5: Query Interface (show if embedding is complete)
-                if st.session_state.embedding_complete and st.session_state.chunker_embedder:
-                    st.divider()
-                    st.header("🔍 Step 5: Query Interface")
+                # if st.session_state.embedding_complete and st.session_state.chunker_embedder:
+                #     st.divider()
+                #     st.header("🔍 Step 5: Query Interface")
                     
-                    chunker = st.session_state.chunker_embedder
+                #     chunker = st.session_state.chunker_embedder
                     
-                    # Display embedding stats
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("📊 Total Chunks", chunker.collection.count())
-                    with col2:
-                        st.metric("💾 Database", "ChromaDB")
-                    with col3:
-                        st.metric("✅ Status", "Ready for Search")
+                #     # Display embedding stats
+                #     col1, col2, col3 = st.columns(3)
+                #     with col1:
+                #         st.metric("📊 Total Chunks", chunker.collection.count())
+                #     with col2:
+                #         st.metric("💾 Database", "ChromaDB")
+                #     with col3:
+                #         st.metric("✅ Status", "Ready for Search")
                     
-                    query = st.text_input(
-                        "Enter your query:",
-                        placeholder="e.g., insurance coverage benefits",
-                        key="query_input"
-                    )
+                #     query = st.text_input(
+                #         "Enter your query:",
+                #         placeholder="e.g., insurance coverage benefits",
+                #         key="query_input"
+                #     )
                     
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        n_results = st.slider("Number of results", 1, 10, 3)
-                    with col2:
-                        filter_type = st.selectbox(
-                            "Filter by type",
-                            ["All", "text", "table_row", "table_header"]
-                        )
+                #     col1, col2 = st.columns([3, 1])
+                #     with col1:
+                #         n_results = st.slider("Number of results", 1, 10, 3)
+                #     with col2:
+                #         filter_type = st.selectbox(
+                #             "Filter by type",
+                #             ["All", "text", "table_row", "table_header"]
+                #         )
                     
-                    if st.button("🔎 Search") and query:
-                        filter_param = None if filter_type == "All" else filter_type
+                #     if st.button("🔎 Search") and query:
+                #         filter_param = None if filter_type == "All" else filter_type
                         
-                        with st.spinner("Searching..."):
-                            results = chunker.query_similar(query, n_results, filter_param)
+                #         with st.spinner("Searching..."):
+                #             results = chunker.query_similar(query, n_results, filter_param)
                             
-                            if results and results['documents'][0]:
-                                st.subheader(f"📋 Search Results for: '{query}'")
+                #             if results and results['documents'][0]:
+                #                 st.subheader(f"📋 Search Results for: '{query}'")
                                 
-                                for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
-                                    with st.expander(f"Result {i+1} ({metadata['type']})"):
-                                        st.write("**Content:**")
-                                        st.write(doc[:500] + ("..." if len(doc) > 500 else ""))
+                #                 for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
+                #                     with st.expander(f"Result {i+1} ({metadata['type']})"):
+                #                         st.write("**Content:**")
+                #                         st.write(doc[:500] + ("..." if len(doc) > 500 else ""))
                                         
-                                        st.write("**Metadata:**")
-                                        if metadata['type'] == 'text':
-                                            st.write(f"- Source: Page {metadata['page_num']}")
-                                            st.write(f"- File: {metadata['source_file']}")
-                                        elif metadata['type'] in ['table_row', 'table_header']:
-                                            st.write(f"- Source: {metadata['table_file']}")
-                                            if metadata['type'] == 'table_row':
-                                                st.write(f"- Row: {metadata['row_idx']}")
+                #                         st.write("**Metadata:**")
+                #                         if metadata['type'] == 'text':
+                #                             st.write(f"- Source: Page {metadata['page_num']}")
+                #                             st.write(f"- File: {metadata['source_file']}")
+                #                         elif metadata['type'] in ['table_row', 'table_header']:
+                #                             st.write(f"- Source: {metadata['table_file']}")
+                #                             if metadata['type'] == 'table_row':
+                #                                 st.write(f"- Row: {metadata['row_idx']}")
                                         
-                                        if metadata.get('table_references'):
-                                            st.write(f"- References: {metadata['table_references']}")
-                            else:
-                                st.warning("No results found for your query.")
+                #                         if metadata.get('table_references'):
+                #                             st.write(f"- References: {metadata['table_references']}")
+                #             else:
+                #                 st.warning("No results found for your query.")
     
     else:
         st.info("👆 Please upload a PDF file to get started")

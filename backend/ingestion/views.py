@@ -72,6 +72,7 @@ def chunk_and_embed_api(request):
 
     output_dir = request.data.get("output_dir")
     chroma_db_dir = request.data.get("chroma_db_dir")
+    doc_type = request.data.get("doc_type", "unknown")  # New: document type parameter
     if not output_dir or not chroma_db_dir:
         logger.warning("chunk_and_embed_api missing output_dir or chroma_db_dir")
         return Response({"error": "output_dir and chroma_db_dir required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -89,7 +90,8 @@ def chunk_and_embed_api(request):
             azure_api_version=AZURE_API_VERSION,
             embedding_model=EMBEDDING_MODEL,
             chroma_persist_dir=chroma_db_dir,
-            semantic_threshold=0.75
+            semantic_threshold=0.75,
+            doc_type=doc_type  # New: pass document type
         )
         chunker.process_all_data(output_dir)
         logger.info(f"Chunking and embedding completed for {output_dir}, collection size: {chunker.collection.count()}")

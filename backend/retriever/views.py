@@ -9,6 +9,8 @@ from langchain_openai import AzureOpenAIEmbeddings
 from langchain_openai import AzureChatOpenAI
 import logging
 from logs.utils import setup_logging
+from evaluation.metrics import RetrievalEvaluator
+from typing import List, Dict, Any
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -16,44 +18,91 @@ logger = logging.getLogger(__name__)
 # Import our simple prompt configuration
 from config.prompt_config import prompt_config
 
+# Initialize evaluation system
+evaluator = RetrievalEvaluator()
+
 # ---------------------------
 # Direct ChromaDB + LLM Query
 # ---------------------------
-def query_document_internal(collection, embedding_model, query, k=5):
-    logger.info(f"Querying ChromaDB for: '{query}' with top {k} results.")
+def query_document_internal(collection, embedding_model, query, k=5, doc_type_filter=None, 
+                          evaluate_retrieval=False):
+    """Enhanced query function with document domain filtering and evaluation."""
+    logger.info(f"Querying ChromaDB for: '{query}' with top {k} results, doc_type_filter: {doc_type_filter}")
+    
     # Get query embedding
     try:
         query_embedding = embedding_model.embed_query(query)
     except Exception as e:
         logger.error(f"Error getting embedding for query: {e}")
-        return {"answer": "Error getting embedding.", "sources": []}
-    # Search ChromaDB directly
+        return {"answer": "Error getting embedding.", "sources": [], "evaluation": None}
+    
+    # Prepare filters for document domain integration
+    where_filter = {}
+    if doc_type_filter:
+        # Filter by document type (policy, brochure, etc.)
+        if doc_type_filter in ['policy', 'brochure', 'prospectus', 'terms']:
+            where_filter["doc_type"] = doc_type_filter
+            logger.info(f"Applying document type filter: doc_type = '{doc_type_filter}'")
+    
+    # Search ChromaDB with domain filtering
     try:
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=k
-        )
+        search_params = {
+            "query_embeddings": [query_embedding],
+            "n_results": k
+        }
+        if where_filter:
+            search_params["where"] = where_filter
+            
+        results = collection.query(**search_params)
     except Exception as e:
         logger.error(f"Error querying ChromaDB: {e}")
-        return {"answer": "Error querying database.", "sources": []}
+        return {"answer": "Error querying database.", "sources": [], "evaluation": None}
     # Build context from results
     if not results['documents'] or not results['documents'][0]:
         logger.info("No relevant documents found for query.")
-        return {"answer": "No relevant documents found.", "sources": []}
+        evaluation_results = None
+        if evaluate_retrieval:
+            evaluation_results = {"error": "No documents found for evaluation"}
+        return {"answer": "No relevant documents found.", "sources": [], "evaluation": evaluation_results}
+        
     context_parts = []
     sources = []
+    retrieved_docs = []
+    
     for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
         context_parts.append(f"[Source {i+1}] {doc}")
-        sources.append({
+        
+        source_info = {
+            "id": metadata.get("chunk_idx", f"doc_{i}"),
             "content": doc,
+            "text": doc,  # For evaluation
             "page": metadata.get("page_num"),
             "table": metadata.get("table_file"),
             "row_index": metadata.get("row_idx"),
             "type": metadata.get("type"),
             "chunking_method": metadata.get("chunking_method", "unknown"),
             "chunk_idx": metadata.get("chunk_idx"),
-        })
+            "metadata": metadata
+        }
+        sources.append(source_info)
+        retrieved_docs.append(source_info)
+        
     context = "\n\n".join(context_parts)
+    
+    # Perform evaluation if requested
+    evaluation_results = None
+    if evaluate_retrieval:
+        try:
+            evaluation_results = evaluator.comprehensive_evaluation(
+                query=query,
+                retrieved_docs=retrieved_docs,
+                embeddings_client=embedding_model,
+                k=min(k, len(retrieved_docs))
+            )
+            logger.info(f"Retrieval evaluation completed: avg_similarity={evaluation_results.get('avg_semantic_similarity', 'N/A'):.3f}")
+        except Exception as e:
+            logger.error(f"Error during evaluation: {e}")
+            evaluation_results = {"error": f"Evaluation failed: {str(e)}"}
     # Initialize LLM
     try:
         llm = AzureChatOpenAI(
@@ -83,16 +132,22 @@ def query_document_internal(collection, embedding_model, query, k=5):
     except Exception as e:
         logger.error(f"Error invoking LLM: {e}")
         answer = "Error generating answer from LLM."
-    return {"answer": answer, "sources": sources}
+    response = {"answer": answer, "sources": sources}
+    if evaluation_results:
+        response["evaluation"] = evaluation_results
+    return response
 
 @api_view(['POST'])
 def query_document(request):
-    """API endpoint to query the document database."""
+    """Enhanced API endpoint to query the document database with domain filtering and evaluation."""
     try:
         query_text = request.data.get("query")
         chroma_db_dir = request.data.get("chroma_db_dir")
         k = request.data.get("k", 5)
-        logger.info(f"Received query_document API call: query='{query_text}', chroma_db_dir='{chroma_db_dir}', k={k}")
+        doc_type_filter = request.data.get("doc_type")  # New: document type filtering
+        evaluate_retrieval = request.data.get("evaluate", False)  # New: evaluation flag
+        
+        logger.info(f"Received query_document API call: query='{query_text}', chroma_db_dir='{chroma_db_dir}', k={k}, doc_type={doc_type_filter}, evaluate={evaluate_retrieval}")
         if not query_text:
             logger.warning("query_document: 'query' is required.")
             return Response({"error": "query is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -109,13 +164,44 @@ def query_document(request):
             openai_api_version=os.getenv("AZURE_OPENAI_TEXT_VERSION"),
             azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
         )
-        # Perform query
-        result = query_document_internal(collection, embeddings, query_text, k)
-        logger.info("Query processed and response returned.")
+        # Perform query with enhanced parameters
+        result = query_document_internal(
+            collection=collection, 
+            embedding_model=embeddings, 
+            query=query_text, 
+            k=k,
+            doc_type_filter=doc_type_filter,
+            evaluate_retrieval=evaluate_retrieval
+        )
+        logger.info("Enhanced query processed and response returned.")
         return Response(result, status=status.HTTP_200_OK)
     except Exception as e:
         logger.error(f"Error in query_document API: {e}")
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def evaluation_summary(request):
+    """API endpoint to get evaluation summary and statistics."""
+    try:
+        summary = evaluator.get_evaluation_summary()
+        logger.info("Evaluation summary retrieved successfully")
+        return Response(summary, status=status.HTTP_200_OK)
+    except Exception as e:
+        logger.error(f"Error getting evaluation summary: {e}")
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# @api_view(['GET'])
+# def evaluation_summary(request):
+#     """API endpoint to get evaluation summary statistics."""
+#     try:
+#         summary = evaluator.get_evaluation_summary()
+#         logger.info("Evaluation summary retrieved successfully.")
+#         return Response(summary, status=status.HTTP_200_OK)
+#     except Exception as e:
+#         logger.error(f"Error getting evaluation summary: {e}")
+#         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ---------------------------
