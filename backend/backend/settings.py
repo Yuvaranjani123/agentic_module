@@ -42,7 +42,8 @@ INSTALLED_APPS = [
     'corsheaders',
     'ingestion',
     'retriever',
-    'logs'
+    'logs',
+    'agents',  # Agentic retrieval system
 ]
 
 MIDDLEWARE = [

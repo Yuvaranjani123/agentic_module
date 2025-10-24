@@ -9,6 +9,9 @@ from datetime import datetime
 import pdfplumber
 import requests
 from dotenv import load_dotenv
+import zipfile
+import tempfile
+import shutil
 
 # Load environment variables from .env file
 load_dotenv()
@@ -19,7 +22,7 @@ DJANGO_API = os.getenv("API_BASE")
 
 
 @st.cache_resource
-def get_cached_chunker_embedder(chroma_db_dir: str, output_dir: str, doc_type: str = "unknown"):
+def get_cached_chunker_embedder(chroma_db_dir: str, output_dir: str, doc_type: str = "unknown", doc_name: str = "unknown"):
     """Cached function to call Django API for chunking and embedding."""
     try:
         from dotenv import load_dotenv
@@ -28,7 +31,7 @@ def get_cached_chunker_embedder(chroma_db_dir: str, output_dir: str, doc_type: s
         # Call Django API for chunking and embedding
         resp = requests.post(
             f"{DJANGO_API}/api/chunk_and_embed/",
-            json={"output_dir": output_dir, "chroma_db_dir": chroma_db_dir, "doc_type": doc_type}
+            json={"output_dir": output_dir, "chroma_db_dir": chroma_db_dir, "doc_type": doc_type, "doc_name": doc_name}
         )
         
         if resp.status_code == 200:
@@ -178,7 +181,7 @@ class StreamlitRAGPipeline:
     
     def chunk_and_embed(self, doc_type: str = "unknown"):
         """Run chunking and embedding process via Django API."""
-        result = get_cached_chunker_embedder(self.chroma_db_dir, self.output_dir, doc_type)
+        result = get_cached_chunker_embedder(self.chroma_db_dir, self.output_dir, doc_type, self.pdf_name)
         
         if result["success"]:
             # Create a mock chunker object to maintain compatibility
@@ -225,6 +228,12 @@ def main():
         st.session_state.chunker_embedder = None
     if 'embedding_complete' not in st.session_state:
         st.session_state.embedding_complete = False
+    if 'uploaded_files_list' not in st.session_state:
+        st.session_state.uploaded_files_list = []
+    if 'file_labels' not in st.session_state:
+        st.session_state.file_labels = {}
+    if 'labeling_complete' not in st.session_state:
+        st.session_state.labeling_complete = False
     
     pipeline = st.session_state.pipeline
     
@@ -232,27 +241,64 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configuration")
         
-        # PDF Upload
-        uploaded_file = st.file_uploader(
-            "Upload PDF Document",
-            type=['pdf'],
-            help="Upload the PDF document you want to process"
+        # Upload mode selection
+        st.subheader("📤 Upload Mode")
+        upload_mode = st.radio(
+            "Choose upload mode:",
+            ["Single PDF", "Multiple PDFs (ZIP)"],
+            help="Upload one PDF or a ZIP containing multiple PDFs"
         )
         
-        # Document Type Selection
-        st.subheader("🏷️ Document Type")
-        doc_type_options = {
-            "Policy Document": "policy",
-            "Brochure": "brochure", 
-            "Prospectus": "prospectus",
-            "Terms & Conditions": "terms"
-        }
-        selected_doc_type_label = st.selectbox(
-            "Select Document Type",
-            options=list(doc_type_options.keys()),
-            help="Choose the type of document for better categorization and filtering"
-        )
-        selected_doc_type = doc_type_options[selected_doc_type_label]
+        # File Upload
+        if upload_mode == "Single PDF":
+            uploaded_file = st.file_uploader(
+                "Upload PDF Document",
+                type=['pdf'],
+                help="Upload the PDF document you want to process"
+            )
+            
+            # Document Type Selection (for single file)
+            if uploaded_file:
+                st.subheader("🏷️ Document Type")
+                doc_type_options = {
+                    "Policy Document": "policy",
+                    "Brochure": "brochure", 
+                    "Prospectus": "prospectus",
+                    "Terms & Conditions": "terms",
+                    "Other (Custom)": "custom"
+                }
+                selected_doc_type_label = st.selectbox(
+                    "Select Document Type",
+                    options=list(doc_type_options.keys()),
+                    help="Choose the type of document for better categorization and filtering"
+                )
+                
+                # If "Other (Custom)" is selected, show text input
+                if selected_doc_type_label == "Other (Custom)":
+                    custom_doc_type = st.text_input(
+                        "Enter custom document type",
+                        placeholder="e.g., claim-form, certificate, addendum",
+                        help="Enter a custom document type (lowercase, use hyphens for spaces)"
+                    )
+                    if custom_doc_type and custom_doc_type.strip():
+                        selected_doc_type = custom_doc_type.strip().lower().replace(' ', '-')
+                    else:
+                        selected_doc_type = "custom"
+                        if 'custom_type_warning_shown' not in st.session_state:
+                            st.warning("⚠️ Please enter a custom document type")
+                            st.session_state.custom_type_warning_shown = True
+                else:
+                    selected_doc_type = doc_type_options[selected_doc_type_label]
+                    if 'custom_type_warning_shown' in st.session_state:
+                        del st.session_state.custom_type_warning_shown
+        else:
+            uploaded_zip = st.file_uploader(
+                "Upload ZIP File",
+                type=['zip'],
+                help="Upload a ZIP file containing multiple PDF documents"
+            )
+            uploaded_file = None  # Will handle ZIP separately
+            selected_doc_type = "unknown"  # Will be set per file during labeling
         
         # Auto-detect output directory (hidden from user)
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -293,7 +339,295 @@ def main():
             st.write("Please set up your .env file")
     
     # Main content area
-    if uploaded_file is not None:
+    if upload_mode == "Multiple PDFs (ZIP)" and 'uploaded_zip' in locals() and uploaded_zip is not None:
+        # Handle ZIP file upload
+        st.header("📦 ZIP File Processing")
+        
+        # Extract ZIP file
+        if not st.session_state.uploaded_files_list:
+            with st.spinner("Extracting ZIP file..."):
+                temp_extract_dir = os.path.join(base_output_dir, "temp", "extracted")
+                os.makedirs(temp_extract_dir, exist_ok=True)
+                
+                # Save ZIP temporarily
+                temp_zip_path = os.path.join(base_output_dir, "temp", uploaded_zip.name)
+                with open(temp_zip_path, "wb") as f:
+                    f.write(uploaded_zip.getbuffer())
+                
+                # Extract ZIP
+                try:
+                    with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+                        zip_ref.extractall(temp_extract_dir)
+                    
+                    # Find all PDF files in extracted folder (including subfolders)
+                    pdf_files = []
+                    for root, dirs, files in os.walk(temp_extract_dir):
+                        for file in files:
+                            if file.lower().endswith('.pdf'):
+                                pdf_path = os.path.join(root, file)
+                                # Get relative path for display
+                                rel_path = os.path.relpath(pdf_path, temp_extract_dir)
+                                pdf_files.append({
+                                    "filename": file,
+                                    "display_name": rel_path,
+                                    "full_path": pdf_path
+                                })
+                    
+                    st.session_state.uploaded_files_list = pdf_files
+                    
+                    # Initialize labels with default "unknown"
+                    for pdf in pdf_files:
+                        if pdf["filename"] not in st.session_state.file_labels:
+                            st.session_state.file_labels[pdf["filename"]] = "unknown"
+                    
+                    st.success(f"✅ Extracted {len(pdf_files)} PDF files from ZIP")
+                    
+                except Exception as e:
+                    st.error(f"❌ Error extracting ZIP: {str(e)}")
+        
+        # Display labeling interface
+        if st.session_state.uploaded_files_list:
+            st.subheader("🏷️ Step 1: Label Documents")
+            st.info("Please assign a document type to each PDF file. This helps with better categorization and filtering during retrieval.")
+            
+            # Document type options
+            doc_type_options = {
+                "Unknown": "unknown",
+                "Policy Document": "policy",
+                "Brochure": "brochure", 
+                "Prospectus": "prospectus",
+                "Terms & Conditions": "terms",
+                "Other (Custom)": "custom"
+            }
+            
+            # Create a table for labeling
+            st.write(f"**Total Files:** {len(st.session_state.uploaded_files_list)}")
+            
+            # Use columns for better layout
+            for idx, pdf_info in enumerate(st.session_state.uploaded_files_list):
+                with st.expander(f"📄 {pdf_info['display_name']}", expanded=(idx < 3)):
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        st.write(f"**File:** {pdf_info['filename']}")
+                        # Try to show first page preview if possible
+                        try:
+                            with pdfplumber.open(pdf_info['full_path']) as pdf:
+                                st.write(f"**Pages:** {len(pdf.pages)}")
+                        except:
+                            pass
+                    
+                    with col2:
+                        current_label = st.session_state.file_labels.get(pdf_info['filename'], 'unknown')
+                        
+                        # Check if current label is a custom value (not in predefined options)
+                        is_custom = current_label not in doc_type_options.values() or current_label == 'custom'
+                        
+                        # Find the key for current value or default to custom
+                        if is_custom and current_label != 'unknown':
+                            current_label_key = "Other (Custom)"
+                            # Store the actual custom value temporarily
+                            if f"custom_value_{pdf_info['filename']}" not in st.session_state:
+                                st.session_state[f"custom_value_{pdf_info['filename']}"] = current_label
+                        else:
+                            current_label_key = [k for k, v in doc_type_options.items() if v == current_label][0]
+                        
+                        selected_label = st.selectbox(
+                            "Document Type",
+                            options=list(doc_type_options.keys()),
+                            index=list(doc_type_options.keys()).index(current_label_key),
+                            key=f"label_{idx}_{pdf_info['filename']}"
+                        )
+                        
+                        # If "Other (Custom)" is selected, show text input
+                        if selected_label == "Other (Custom)":
+                            custom_value = st.text_input(
+                                "Enter custom type",
+                                value=st.session_state.get(f"custom_value_{pdf_info['filename']}", ""),
+                                placeholder="e.g., claim-form, certificate, addendum",
+                                key=f"custom_input_{idx}_{pdf_info['filename']}",
+                                help="Enter a custom document type (lowercase, use hyphens for spaces)"
+                            )
+                            if custom_value and custom_value.strip():
+                                # Clean and store custom value
+                                custom_clean = custom_value.strip().lower().replace(' ', '-')
+                                st.session_state.file_labels[pdf_info['filename']] = custom_clean
+                                st.session_state[f"custom_value_{pdf_info['filename']}"] = custom_clean
+                            else:
+                                # Default to 'custom' if no value entered yet
+                                st.session_state.file_labels[pdf_info['filename']] = "custom"
+                        else:
+                            # Use predefined option
+                            st.session_state.file_labels[pdf_info['filename']] = doc_type_options[selected_label]
+                            # Clear custom value if exists
+                            if f"custom_value_{pdf_info['filename']}" in st.session_state:
+                                del st.session_state[f"custom_value_{pdf_info['filename']}"]
+            
+            # Show labeling summary
+            st.divider()
+            st.subheader("📊 Labeling Summary")
+            
+            label_counts = {}
+            custom_types = []
+            
+            for label in st.session_state.file_labels.values():
+                label_counts[label] = label_counts.get(label, 0) + 1
+                # Track custom types separately
+                if label not in ['unknown', 'policy', 'brochure', 'prospectus', 'terms', 'custom']:
+                    if label not in custom_types:
+                        custom_types.append(label)
+            
+            # Show predefined types
+            predefined_options = {k: v for k, v in doc_type_options.items() if v != 'custom'}
+            cols = st.columns(len(predefined_options))
+            for idx, (label_name, label_value) in enumerate(predefined_options.items()):
+                with cols[idx]:
+                    count = label_counts.get(label_value, 0)
+                    st.metric(label_name, count)
+            
+            # Show custom types if any
+            if custom_types:
+                st.write("**Custom Types:**")
+                custom_cols = st.columns(min(len(custom_types), 5))
+                for idx, custom_type in enumerate(custom_types):
+                    with custom_cols[idx % 5]:
+                        count = label_counts.get(custom_type, 0)
+                        st.metric(f"📌 {custom_type}", count)
+            
+            # Check if all labeled
+            unlabeled_count = label_counts.get('unknown', 0)
+            incomplete_custom_count = label_counts.get('custom', 0)  # Custom selected but not specified
+            
+            if unlabeled_count > 0:
+                st.warning(f"⚠️ {unlabeled_count} files still unlabeled (marked as 'Unknown')")
+            if incomplete_custom_count > 0:
+                st.warning(f"⚠️ {incomplete_custom_count} files marked as 'Other (Custom)' but no custom type entered")
+            if unlabeled_count == 0 and incomplete_custom_count == 0:
+                st.success("✅ All files have been labeled!")
+            
+            # Proceed button
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Confirm Labels & Proceed", type="primary"):
+                    # Check for incomplete custom entries
+                    if incomplete_custom_count > 0:
+                        st.error("❌ Please enter custom document types for all files marked as 'Other (Custom)'")
+                    else:
+                        st.session_state.labeling_complete = True
+                        st.success("Labels confirmed! You can now process each document.")
+                        st.rerun()
+            
+            with col2:
+                if st.button("🔄 Reset Labels"):
+                    for pdf in st.session_state.uploaded_files_list:
+                        st.session_state.file_labels[pdf["filename"]] = "unknown"
+                        # Clear custom values
+                        if f"custom_value_{pdf['filename']}" in st.session_state:
+                            del st.session_state[f"custom_value_{pdf['filename']}"]
+                    st.success("Labels reset to 'Unknown'")
+                    st.rerun()
+        
+        # Show processing options after labeling
+        if st.session_state.labeling_complete:
+            st.divider()
+            st.header("📋 Step 2: Process Documents")
+            st.info("Each document will be processed individually with its assigned label. You can process them all at once or select specific documents.")
+            
+            # Option to process all or select specific files
+            process_mode = st.radio(
+                "Processing Mode:",
+                ["Process All Documents", "Select Specific Documents"],
+                help="Choose whether to process all documents or select specific ones"
+            )
+            
+            if process_mode == "Select Specific Documents":
+                selected_files = st.multiselect(
+                    "Select documents to process:",
+                    options=[pdf["display_name"] for pdf in st.session_state.uploaded_files_list],
+                    default=[pdf["display_name"] for pdf in st.session_state.uploaded_files_list[:3]]
+                )
+            else:
+                selected_files = [pdf["display_name"] for pdf in st.session_state.uploaded_files_list]
+            
+            st.write(f"**Selected:** {len(selected_files)} documents")
+            
+            if st.button("🚀 Start Batch Processing", type="primary"):
+                st.header("🔄 Batch Processing in Progress")
+                
+                # Get selected files to process
+                files_to_process = [pdf for pdf in st.session_state.uploaded_files_list 
+                                   if pdf["display_name"] in selected_files]
+                
+                # Progress tracking
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                results_container = st.container()
+                
+                successful = 0
+                failed = 0
+                
+                for idx, pdf_info in enumerate(files_to_process):
+                    doc_label = st.session_state.file_labels[pdf_info["filename"]]
+                    
+                    with results_container:
+                        st.subheader(f"📄 Processing: {pdf_info['filename']}")
+                        st.write(f"**Document Type:** `{doc_label}`")
+                        
+                        with st.spinner(f"Processing {idx+1}/{len(files_to_process)}..."):
+                            try:
+                                # Create a temporary pipeline for this file
+                                temp_pipeline = StreamlitRAGPipeline()
+                                temp_pipeline.setup_directories(pdf_info['full_path'], base_output_dir)
+                                
+                                # Step 1: Extract tables
+                                st.write("⏳ Step 1: Extracting tables...")
+                                temp_pipeline.extract_tables()
+                                
+                                # Step 2: Extract text
+                                st.write("⏳ Step 2: Extracting text...")
+                                temp_pipeline.extract_text_content()
+                                
+                                # Step 3: Chunk and embed with document type
+                                st.write(f"⏳ Step 3: Chunking and embedding (type: {doc_label})...")
+                                chunker, message = temp_pipeline.chunk_and_embed(doc_label)
+                                
+                                if chunker:
+                                    collection_size = chunker.collection.count()
+                                    st.success(f"✅ {pdf_info['filename']} processed successfully! Collection size: {collection_size}")
+                                    successful += 1
+                                else:
+                                    st.error(f"❌ Chunking failed for {pdf_info['filename']}: {message}")
+                                    failed += 1
+                                    
+                            except Exception as e:
+                                st.error(f"❌ Error processing {pdf_info['filename']}: {str(e)}")
+                                failed += 1
+                        
+                        st.divider()
+                    
+                    # Update progress
+                    progress = (idx + 1) / len(files_to_process)
+                    progress_bar.progress(progress)
+                    status_text.text(f"Processing: {idx+1}/{len(files_to_process)} files completed")
+                
+                # Final summary
+                st.header("📊 Batch Processing Summary")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("✅ Successful", successful)
+                with col2:
+                    st.metric("❌ Failed", failed)
+                with col3:
+                    st.metric("📁 Total", len(files_to_process))
+                
+                if successful > 0:
+                    st.success(f"🎉 Batch processing completed! {successful} documents added to the knowledge base.")
+                    st.info("💡 You can now query these documents in the Retrieval interface!")
+                
+                if failed > 0:
+                    st.warning(f"⚠️ {failed} documents failed to process. Check the logs above for details.")
+    
+    elif uploaded_file is not None:
         # Save uploaded file temporarily
         temp_pdf_path = os.path.join(base_output_dir, "temp", uploaded_file.name)
         os.makedirs(os.path.dirname(temp_pdf_path), exist_ok=True)

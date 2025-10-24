@@ -21,13 +21,14 @@ except ImportError:
 class ChunkerEmbedder:
     def __init__(self, azure_endpoint: str, azure_api_key: str, azure_api_version: str,
                  embedding_model: str, chroma_persist_dir: str, semantic_threshold: float = 0.75, 
-                 doc_type: str = "unknown"):
+                 doc_type: str = "unknown", doc_name: str = "unknown"):
         """
         Initialize the ChunkerEmbedder with Azure OpenAI and ChromaDB settings.
         
         Args:
             semantic_threshold: Cosine similarity threshold for semantic chunking (0-1)
             doc_type: Document type for metadata (policy, brochure, prospectus, terms)
+            doc_name: Document name for unique chunk IDs and metadata tracking
         """
         # Initialize Azure OpenAI embeddings via LangChain wrapper
         self.client = AzureOpenAIEmbeddings(
@@ -40,6 +41,7 @@ class ChunkerEmbedder:
         self.embedding_model = embedding_model
         self.semantic_threshold = semantic_threshold
         self.doc_type = doc_type  # Store document type for metadata
+        self.doc_name = doc_name  # Store document name for unique IDs
 
         # Initialize ChromaDB
         self.chroma_client = chromadb.PersistentClient(path=chroma_persist_dir)
@@ -222,7 +224,8 @@ class ChunkerEmbedder:
                             "text": semantic_chunk.strip(),
                             "metadata": {
                                 "type": "text",
-                                "doc_type": self.doc_type,  # Add document type
+                                "doc_type": self.doc_type,
+                                "doc_name": self.doc_name,
                                 "page_num": page_num,
                                 "source_file": fname,
                                 "chunk_idx": f"{idx}_{sem_idx}",
@@ -237,7 +240,8 @@ class ChunkerEmbedder:
                         "text": para.strip(),
                         "metadata": {
                             "type": "text",
-                            "doc_type": self.doc_type,  # Add document type
+                            "doc_type": self.doc_type,
+                            "doc_name": self.doc_name,
                             "page_num": page_num,
                             "source_file": fname,
                             "chunk_idx": idx,
@@ -251,7 +255,8 @@ class ChunkerEmbedder:
                 "text": carryover_heading.strip(),
                 "metadata": {
                     "type": "text",
-                    "doc_type": self.doc_type,  # Add document type
+                    "doc_type": self.doc_type,
+                    "doc_name": self.doc_name,
                     "page_num": page_num,
                     "source_file": fname,
                     "chunk_idx": 999,
@@ -275,7 +280,8 @@ class ChunkerEmbedder:
                         "text": header_text,
                         "metadata": {
                             "type": "table_header",
-                            "doc_type": self.doc_type,  # Add document type
+                            "doc_type": self.doc_type,
+                            "doc_name": self.doc_name,
                             "table_file": fname,
                             "row_idx": -1,
                             "total_rows": len(df)
@@ -288,7 +294,8 @@ class ChunkerEmbedder:
                             "text": row_text,
                             "metadata": {
                                 "type": "table_row",
-                                "doc_type": self.doc_type,  # Add document type
+                                "doc_type": self.doc_type,
+                                "doc_name": self.doc_name,
                                 "table_file": fname,
                                 "row_idx": idx,
                                 "total_rows": len(df),
@@ -313,12 +320,13 @@ class ChunkerEmbedder:
                 print(f"Skipping chunk {i} due to embedding error")
                 continue
             chunk_type = metadata["type"]
+            doc_name_safe = metadata.get('doc_name', 'unknown').replace(' ', '_').replace('/', '_')
             if chunk_type == "text":
-                chunk_id = f"text_{metadata['page_num']}_{metadata['chunk_idx']}"
+                chunk_id = f"{doc_name_safe}_text_{metadata['page_num']}_{metadata['chunk_idx']}"
             elif chunk_type in ["table_row", "table_header"]:
-                chunk_id = f"table_{metadata['table_file']}_{metadata['row_idx']}"
+                chunk_id = f"{doc_name_safe}_table_{metadata['table_file']}_{metadata['row_idx']}"
             else:
-                chunk_id = f"chunk_{i}"
+                chunk_id = f"{doc_name_safe}_chunk_{i}"
             documents.append(text)
             embeddings.append(embedding)
             metadatas.append(metadata)

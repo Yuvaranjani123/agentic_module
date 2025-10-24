@@ -8,13 +8,19 @@ load_dotenv()
 # Django API base URL
 DJANGO_API = os.getenv("API_BASE")
 
-st.set_page_config(page_title="Insurance RAG - Retrieval", page_icon="🔍")
+st.set_page_config(page_title="Insurance RAG - Agent Retrieval", page_icon="🤖")
 
-st.title("🔍 Insurance Document Retrieval")
+st.title("🤖 Insurance Document Retrieval (Agent)")
+st.caption("Powered by Retrieval Agent - Using existing retrieval logic wrapped in an agent pattern")
 
 # Initialize session state
 if 'selected_query' not in st.session_state:
     st.session_state.selected_query = ""
+if 'conversation_id' not in st.session_state:
+    import uuid
+    st.session_state.conversation_id = str(uuid.uuid4())
+if 'conversation_history' not in st.session_state:
+    st.session_state.conversation_history = []
 
 # Configuration sidebar
 with st.sidebar:
@@ -51,21 +57,44 @@ with st.sidebar:
     
     k_results = st.slider("Number of results", min_value=1, max_value=20, value=5)
     
-    # Document type filtering
-    st.subheader("🏷️ Document Filtering")
-    doc_type_options = {
-        "All Documents": None,
-        "Policy Documents": "policy", 
-        "Brochures": "brochure",
-        "Prospectus": "prospectus",
-        "Terms & Conditions": "terms"
-    }
-    selected_doc_type = st.selectbox(
-        "Document Type",
-        options=list(doc_type_options.keys()),
-        help="Filter results by document type for more relevant answers"
-    )
-    doc_type_filter = doc_type_options[selected_doc_type]
+    # Advanced options - collapsed by default
+    with st.expander("⚙️ Advanced Options", expanded=False):
+        st.caption("Optional: Filter documents by type (leave as 'Search All' for normal use)")
+        
+        filter_mode = st.radio(
+            "Filter Mode:",
+            ["Search All", "Include Specific Types", "Exclude Specific Types"],
+            help="Default: Search all documents. Use filters for testing/debugging only."
+        )
+        
+        # Get all available document types
+        common_doc_types = ["policy", "brochure", "prospectus", "terms", "premium-calculation", 
+                           "claim-form", "certificate", "addendum", "rider-document"]
+        
+        doc_type_filter = None
+        exclude_doc_types = []
+        
+        if filter_mode == "Include Specific Types":
+            selected_types = st.multiselect(
+                "Include document types:",
+                options=common_doc_types,
+                default=None,
+                help="Only search in selected document types"
+            )
+            if selected_types:
+                doc_type_filter = selected_types
+                st.info(f"✅ Including: {', '.join(doc_type_filter)}")
+        
+        elif filter_mode == "Exclude Specific Types":
+            excluded_types = st.multiselect(
+                "Exclude document types:",
+                options=common_doc_types,
+                default=None,
+                help="Exclude these document types from search"
+            )
+            if excluded_types:
+                exclude_doc_types = excluded_types
+                st.warning(f"🚫 Excluding: {', '.join(exclude_doc_types)}")
     
     # Evaluation options
     st.subheader("📊 Evaluation")
@@ -74,6 +103,35 @@ with st.sidebar:
         value=True,  # Changed to True by default
         help="Get detailed metrics about retrieval quality (may slow down responses)"
     )
+    
+    # Conversation memory controls
+    st.subheader("💬 Conversation Memory")
+    st.caption(f"Session ID: {st.session_state.conversation_id[:8]}...")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 New Conversation"):
+            import uuid
+            st.session_state.conversation_id = str(uuid.uuid4())
+            st.session_state.conversation_history = []
+            # Clear server-side history
+            try:
+                requests.post(
+                    f"{DJANGO_API}/agents/clear-conversation/",
+                    json={
+                        "chroma_db_dir": chroma_db_dir if chroma_db_dir else "",
+                        "conversation_id": st.session_state.conversation_id
+                    },
+                    timeout=5
+                )
+            except:
+                pass
+            st.success("Started new conversation!")
+            st.rerun()
+    
+    with col2:
+        if len(st.session_state.conversation_history) > 0:
+            st.metric("History", f"{len(st.session_state.conversation_history)} exchanges")
     
     # if st.button("📈 View Evaluation Summary"):
     #     try:
@@ -95,15 +153,15 @@ with st.sidebar:
     #         st.error(f"❌ Error loading evaluation: {str(e)}")
     
     # Django API Status
-    st.subheader("🔗 Django API Status")
+    st.subheader("🔗 Django Agent API Status")
     try:
-        resp = requests.get(f"{DJANGO_API}/retriever/query/", timeout=5)
+        resp = requests.get(f"{DJANGO_API}/agents/query/", timeout=5)
         if resp.status_code in [200, 405]:  # 405 means endpoint exists but wrong method
-            st.success("✅ Django API accessible")
+            st.success("✅ Agent API accessible")
         else:
-            st.error(f"❌ Django API error: {resp.status_code}")
+            st.error(f"❌ Agent API error: {resp.status_code}")
     except Exception as e:
-        st.error(f"❌ Django API not accessible: {str(e)}")
+        st.error(f"❌ Agent API not accessible: {str(e)}")
 
 # Main query interface
 query = st.text_input(
@@ -123,21 +181,31 @@ if st.button("🔍 Search", type="primary") and query:
                     "query": query,
                     "chroma_db_dir": chroma_db_dir,
                     "k": k_results,
-                    "evaluate": enable_evaluation
+                    "evaluate": enable_evaluation,
+                    "conversation_id": st.session_state.conversation_id  # Add conversation ID
                 }
                 
-                # Add document type filter if selected
+                # Add document type filters
                 if doc_type_filter:
-                    api_payload["doc_type"] = doc_type_filter
+                    api_payload["doc_type"] = doc_type_filter  # List of types to include
+                if exclude_doc_types:
+                    api_payload["exclude_doc_types"] = exclude_doc_types  # List of types to exclude
                     
+                # Call agent endpoint instead of retriever
                 response = requests.post(
-                    f"{DJANGO_API}/retriever/query/",
+                    f"{DJANGO_API}/agents/query/",
                     json=api_payload,
                     timeout=60 if enable_evaluation else 30  # Longer timeout for evaluation
                 )
                 
                 if response.status_code == 200:
                     result = response.json()
+                    
+                    # Add to conversation history
+                    st.session_state.conversation_history.append({
+                        "query": query,
+                        "answer": result["answer"]
+                    })
                     
                     st.subheader("📌 Answer")
                     st.write(result["answer"])
@@ -185,11 +253,13 @@ if st.button("🔍 Search", type="primary") and query:
                     
                     if result["sources"]:
                         for i, source in enumerate(result["sources"], 1):
-                            # Enhanced source header with type and filtering info
+                            # Enhanced source header with document type badge
                             source_type = source.get('type', 'Unknown')
-                            source_header = f"Source {i} - {source_type.title()}"
-                            if doc_type_filter:
-                                source_header += f" [Filtered: {selected_doc_type}]"
+                            doc_type_display = source.get('metadata', {}).get('doc_type', 'unknown')
+                            
+                            # Format doc type as prominent badge
+                            doc_type_badge = doc_type_display.upper()
+                            source_header = f"Source {i} - {source_type.title()} • 📄 {doc_type_badge}"
                                 
                             with st.expander(source_header):
                                 # Source metadata
@@ -235,6 +305,15 @@ if st.button("🔍 Search", type="primary") and query:
 
 # Sample queries section
 st.divider()
+
+# Show conversation history if exists
+if len(st.session_state.conversation_history) > 0:
+    with st.expander(f"💬 Conversation History ({len(st.session_state.conversation_history)} exchanges)", expanded=False):
+        for i, exchange in enumerate(reversed(st.session_state.conversation_history[:-1]), 1):  # Exclude current
+            st.markdown(f"**Q{len(st.session_state.conversation_history) - i}:** {exchange['query']}")
+            st.markdown(f"**A{len(st.session_state.conversation_history) - i}:** {exchange['answer'][:200]}...")
+            st.divider()
+
 st.subheader("💡 Sample Queries")
 
 sample_queries = [

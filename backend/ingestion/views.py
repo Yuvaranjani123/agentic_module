@@ -72,7 +72,8 @@ def chunk_and_embed_api(request):
 
     output_dir = request.data.get("output_dir")
     chroma_db_dir = request.data.get("chroma_db_dir")
-    doc_type = request.data.get("doc_type", "unknown")  # New: document type parameter
+    doc_type = request.data.get("doc_type", "unknown")  # Document type parameter
+    doc_name = request.data.get("doc_name", "unknown")  # Document name parameter
     if not output_dir or not chroma_db_dir:
         logger.warning("chunk_and_embed_api missing output_dir or chroma_db_dir")
         return Response({"error": "output_dir and chroma_db_dir required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -91,7 +92,8 @@ def chunk_and_embed_api(request):
             embedding_model=EMBEDDING_MODEL,
             chroma_persist_dir=chroma_db_dir,
             semantic_threshold=0.75,
-            doc_type=doc_type  # New: pass document type
+            doc_type=doc_type,  # Pass document type
+            doc_name=doc_name   # Pass document name
         )
         chunker.process_all_data(output_dir)
         logger.info(f"Chunking and embedding completed for {output_dir}, collection size: {chunker.collection.count()}")

@@ -22,5 +22,6 @@ from django.conf.urls.static import static
 urlpatterns = [
     # path('admin/', admin.site.urls),
     path('api/', include("ingestion.urls")),
-    path('retriever/', include('retriever.urls')),
+    path('retriever/', include('retriever.urls')),  # Original retrieval endpoint
+    path('agents/', include('agents.urls')),  # Agent-based retrieval endpoint
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
