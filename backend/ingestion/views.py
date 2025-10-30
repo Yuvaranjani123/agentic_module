@@ -30,6 +30,69 @@ def upload_pdf_api(request):
     logger.info(f"PDF uploaded: {save_path}")
     return Response({"pdf_path": save_path, "pdf_name": pdf_file.name}, status=status.HTTP_200_OK)
 
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser])
+def upload_premium_excel_api(request):
+    """
+    Upload premium calculation Excel workbook.
+    This Excel will be used by the premium calculator agent.
+    """
+    excel_file = request.FILES.get('excel')
+    doc_name = request.data.get('doc_name', 'premium_rates')
+    
+    if not excel_file:
+        logger.warning("No Excel file provided to upload_premium_excel_api")
+        return Response({"error": "No Excel file provided"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Validate file extension
+    if not excel_file.name.endswith(('.xlsx', '.xls')):
+        return Response({"error": "File must be Excel format (.xlsx or .xls)"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Save to media/premium_workbooks directory
+    premium_dir = os.path.join(settings.MEDIA_ROOT, 'premium_workbooks')
+    os.makedirs(premium_dir, exist_ok=True)
+    
+    # Use doc_name for consistent naming
+    filename = f"{doc_name}_premium_rates.xlsx"
+    save_path = os.path.join(premium_dir, filename)
+    
+    with open(save_path, 'wb+') as f:
+        for chunk in excel_file.chunks():
+            f.write(chunk)
+    
+    logger.info(f"Premium Excel uploaded: {save_path}")
+    
+    # Store metadata in a JSON file for easy lookup
+    import json
+    metadata_path = os.path.join(premium_dir, 'premium_workbooks_registry.json')
+    
+    # Load existing registry
+    registry = {}
+    if os.path.exists(metadata_path):
+        with open(metadata_path, 'r') as f:
+            registry = json.load(f)
+    
+    # Add/update entry
+    registry[doc_name] = {
+        'excel_path': save_path,
+        'filename': filename,
+        'uploaded_at': str(os.path.getmtime(save_path))
+    }
+    
+    # Save registry
+    with open(metadata_path, 'w') as f:
+        json.dump(registry, f, indent=2)
+    
+    logger.info(f"Registered premium workbook: {doc_name} -> {save_path}")
+    
+    return Response({
+        "message": "Premium Excel uploaded successfully",
+        "excel_path": save_path,
+        "doc_name": doc_name,
+        "filename": filename
+    }, status=status.HTTP_200_OK)
+
 @api_view(['POST'])
 def extract_tables_api(request):
     pdf_path = request.data.get("pdf_path")

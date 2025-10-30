@@ -71,7 +71,13 @@ class StreamlitRAGPipeline:
         self.pdf_name = self.clean_pdf_name(pdf_path)
         self.base_output_dir = base_output_dir
         self.output_dir = os.path.join(base_output_dir, self.pdf_name)
-        self.chroma_db_dir = os.path.join(base_output_dir, "chroma_db", self.pdf_name)
+        
+        # Use unified ChromaDB database for all documents (product-based)
+        # Product name must be provided in session state
+        product_name = st.session_state.get('product_name', '')
+        if not product_name or not product_name.strip():
+            raise ValueError("Product name is required. Please enter a product database name.")
+        self.chroma_db_dir = os.path.join(base_output_dir, "chroma_db", product_name)
         
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.chroma_db_dir, exist_ok=True)
@@ -241,6 +247,29 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configuration")
         
+        # Product/Database Name Configuration
+        st.subheader("🏷️ Product Database Name")
+        if 'product_name' not in st.session_state:
+            st.session_state.product_name = ""
+        
+        product_name = st.text_input(
+            "Database Name: *",
+            value=st.session_state.product_name,
+            help="Required: Enter the product/database name (e.g., 'ActivAssure', 'HealthShield'). All documents will be stored in this unified database.",
+            placeholder="Enter product name (required)"
+        )
+        
+        if product_name and product_name.strip():
+            # Clean the product name (remove spaces, special chars)
+            clean_product_name = product_name.strip().replace(' ', '_')
+            st.session_state.product_name = clean_product_name
+            st.caption(f"💾 Documents will be stored in: `chroma_db/{clean_product_name}/`")
+        else:
+            st.session_state.product_name = ""
+            st.error("❌ Product name is required to proceed")
+        
+        st.divider()
+        
         # Upload mode selection
         st.subheader("📤 Upload Mode")
         upload_mode = st.radio(
@@ -359,28 +388,44 @@ def main():
                     with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
                         zip_ref.extractall(temp_extract_dir)
                     
-                    # Find all PDF files in extracted folder (including subfolders)
-                    pdf_files = []
+                    # Find all processable files in extracted folder (PDFs and Excel)
+                    extracted_files = []
                     for root, dirs, files in os.walk(temp_extract_dir):
                         for file in files:
-                            if file.lower().endswith('.pdf'):
-                                pdf_path = os.path.join(root, file)
+                            file_lower = file.lower()
+                            # Support PDF and Excel files
+                            if file_lower.endswith('.pdf') or file_lower.endswith(('.xlsx', '.xls')):
+                                file_path = os.path.join(root, file)
                                 # Get relative path for display
-                                rel_path = os.path.relpath(pdf_path, temp_extract_dir)
-                                pdf_files.append({
+                                rel_path = os.path.relpath(file_path, temp_extract_dir)
+                                
+                                # Determine file type
+                                if file_lower.endswith('.pdf'):
+                                    file_type = 'pdf'
+                                    default_label = 'unknown'
+                                else:
+                                    file_type = 'excel'
+                                    default_label = 'premium-calculation'  # Excel files default to premium
+                                
+                                extracted_files.append({
                                     "filename": file,
                                     "display_name": rel_path,
-                                    "full_path": pdf_path
+                                    "full_path": file_path,
+                                    "file_type": file_type,
+                                    "default_label": default_label
                                 })
                     
-                    st.session_state.uploaded_files_list = pdf_files
+                    st.session_state.uploaded_files_list = extracted_files
                     
-                    # Initialize labels with default "unknown"
-                    for pdf in pdf_files:
-                        if pdf["filename"] not in st.session_state.file_labels:
-                            st.session_state.file_labels[pdf["filename"]] = "unknown"
+                    # Initialize labels with appropriate defaults
+                    for file_info in extracted_files:
+                        if file_info["filename"] not in st.session_state.file_labels:
+                            st.session_state.file_labels[file_info["filename"]] = file_info["default_label"]
                     
-                    st.success(f"✅ Extracted {len(pdf_files)} PDF files from ZIP")
+                    # Count by type
+                    pdf_count = sum(1 for f in extracted_files if f['file_type'] == 'pdf')
+                    excel_count = sum(1 for f in extracted_files if f['file_type'] == 'excel')
+                    st.success(f"✅ Extracted {len(extracted_files)} files: {pdf_count} PDF(s), {excel_count} Excel file(s)")
                     
                 except Exception as e:
                     st.error(f"❌ Error extracting ZIP: {str(e)}")
@@ -388,7 +433,7 @@ def main():
         # Display labeling interface
         if st.session_state.uploaded_files_list:
             st.subheader("🏷️ Step 1: Label Documents")
-            st.info("Please assign a document type to each PDF file. This helps with better categorization and filtering during retrieval.")
+            st.info("Please assign a document type to each file. PDF files are processed for text/table extraction. Excel files are registered as premium calculators.")
             
             # Document type options
             doc_type_options = {
@@ -397,6 +442,9 @@ def main():
                 "Brochure": "brochure", 
                 "Prospectus": "prospectus",
                 "Terms & Conditions": "terms",
+                "Premium Calculation": "premium-calculation",
+                "Claim Form": "claim-form",
+                "Certificate": "certificate",
                 "Other (Custom)": "custom"
             }
             
@@ -404,21 +452,30 @@ def main():
             st.write(f"**Total Files:** {len(st.session_state.uploaded_files_list)}")
             
             # Use columns for better layout
-            for idx, pdf_info in enumerate(st.session_state.uploaded_files_list):
-                with st.expander(f"📄 {pdf_info['display_name']}", expanded=(idx < 3)):
+            for idx, file_info in enumerate(st.session_state.uploaded_files_list):
+                file_type_icon = "📊" if file_info['file_type'] == 'excel' else "📄"
+                file_type_label = file_info['file_type'].upper()
+                
+                with st.expander(f"{file_type_icon} [{file_type_label}] {file_info['display_name']}", expanded=(idx < 3)):
                     col1, col2 = st.columns([2, 1])
                     
                     with col1:
-                        st.write(f"**File:** {pdf_info['filename']}")
-                        # Try to show first page preview if possible
-                        try:
-                            with pdfplumber.open(pdf_info['full_path']) as pdf:
-                                st.write(f"**Pages:** {len(pdf.pages)}")
-                        except:
-                            pass
+                        st.write(f"**File:** {file_info['filename']}")
+                        st.write(f"**Type:** {file_type_label}")
+                        
+                        # Show preview for PDFs
+                        if file_info['file_type'] == 'pdf':
+                            try:
+                                with pdfplumber.open(file_info['full_path']) as pdf:
+                                    st.write(f"**Pages:** {len(pdf.pages)}")
+                            except:
+                                pass
+                        # Show info for Excel
+                        else:
+                            st.info("💡 Excel files are used for premium calculations. They will be uploaded to the premium workbook registry.")
                     
                     with col2:
-                        current_label = st.session_state.file_labels.get(pdf_info['filename'], 'unknown')
+                        current_label = st.session_state.file_labels.get(file_info['filename'], file_info['default_label'])
                         
                         # Check if current label is a custom value (not in predefined options)
                         is_custom = current_label not in doc_type_options.values() or current_label == 'custom'
@@ -427,8 +484,8 @@ def main():
                         if is_custom and current_label != 'unknown':
                             current_label_key = "Other (Custom)"
                             # Store the actual custom value temporarily
-                            if f"custom_value_{pdf_info['filename']}" not in st.session_state:
-                                st.session_state[f"custom_value_{pdf_info['filename']}"] = current_label
+                            if f"custom_value_{file_info['filename']}" not in st.session_state:
+                                st.session_state[f"custom_value_{file_info['filename']}"] = current_label
                         else:
                             current_label_key = [k for k, v in doc_type_options.items() if v == current_label][0]
                         
@@ -436,32 +493,32 @@ def main():
                             "Document Type",
                             options=list(doc_type_options.keys()),
                             index=list(doc_type_options.keys()).index(current_label_key),
-                            key=f"label_{idx}_{pdf_info['filename']}"
+                            key=f"label_{idx}_{file_info['filename']}"
                         )
                         
                         # If "Other (Custom)" is selected, show text input
                         if selected_label == "Other (Custom)":
                             custom_value = st.text_input(
                                 "Enter custom type",
-                                value=st.session_state.get(f"custom_value_{pdf_info['filename']}", ""),
-                                placeholder="e.g., claim-form, certificate, addendum",
-                                key=f"custom_input_{idx}_{pdf_info['filename']}",
+                                value=st.session_state.get(f"custom_value_{file_info['filename']}", ""),
+                                placeholder="e.g., rider-document, addendum",
+                                key=f"custom_input_{idx}_{file_info['filename']}",
                                 help="Enter a custom document type (lowercase, use hyphens for spaces)"
                             )
                             if custom_value and custom_value.strip():
                                 # Clean and store custom value
                                 custom_clean = custom_value.strip().lower().replace(' ', '-')
-                                st.session_state.file_labels[pdf_info['filename']] = custom_clean
-                                st.session_state[f"custom_value_{pdf_info['filename']}"] = custom_clean
+                                st.session_state.file_labels[file_info['filename']] = custom_clean
+                                st.session_state[f"custom_value_{file_info['filename']}"] = custom_clean
                             else:
                                 # Default to 'custom' if no value entered yet
-                                st.session_state.file_labels[pdf_info['filename']] = "custom"
+                                st.session_state.file_labels[file_info['filename']] = "custom"
                         else:
                             # Use predefined option
-                            st.session_state.file_labels[pdf_info['filename']] = doc_type_options[selected_label]
+                            st.session_state.file_labels[file_info['filename']] = doc_type_options[selected_label]
                             # Clear custom value if exists
-                            if f"custom_value_{pdf_info['filename']}" in st.session_state:
-                                del st.session_state[f"custom_value_{pdf_info['filename']}"]
+                            if f"custom_value_{file_info['filename']}" in st.session_state:
+                                del st.session_state[f"custom_value_{file_info['filename']}"]
             
             # Show labeling summary
             st.divider()
@@ -531,7 +588,7 @@ def main():
         if st.session_state.labeling_complete:
             st.divider()
             st.header("📋 Step 2: Process Documents")
-            st.info("Each document will be processed individually with its assigned label. You can process them all at once or select specific documents.")
+            st.info("PDF files will be processed for text/table extraction. Excel files will be uploaded to the premium calculator registry.")
             
             # Option to process all or select specific files
             process_mode = st.radio(
@@ -543,20 +600,25 @@ def main():
             if process_mode == "Select Specific Documents":
                 selected_files = st.multiselect(
                     "Select documents to process:",
-                    options=[pdf["display_name"] for pdf in st.session_state.uploaded_files_list],
-                    default=[pdf["display_name"] for pdf in st.session_state.uploaded_files_list[:3]]
+                    options=[f["display_name"] for f in st.session_state.uploaded_files_list],
+                    default=[f["display_name"] for f in st.session_state.uploaded_files_list[:3]]
                 )
             else:
-                selected_files = [pdf["display_name"] for pdf in st.session_state.uploaded_files_list]
+                selected_files = [f["display_name"] for f in st.session_state.uploaded_files_list]
             
             st.write(f"**Selected:** {len(selected_files)} documents")
+            
+            # Check if product name is provided
+            if not st.session_state.product_name or not st.session_state.product_name.strip():
+                st.error("❌ Please enter a Product Database Name in the sidebar before processing")
+                st.stop()
             
             if st.button("🚀 Start Batch Processing", type="primary"):
                 st.header("🔄 Batch Processing in Progress")
                 
                 # Get selected files to process
-                files_to_process = [pdf for pdf in st.session_state.uploaded_files_list 
-                                   if pdf["display_name"] in selected_files]
+                files_to_process = [f for f in st.session_state.uploaded_files_list 
+                                   if f["display_name"] in selected_files]
                 
                 # Progress tracking
                 progress_bar = st.progress(0)
@@ -566,41 +628,73 @@ def main():
                 successful = 0
                 failed = 0
                 
-                for idx, pdf_info in enumerate(files_to_process):
-                    doc_label = st.session_state.file_labels[pdf_info["filename"]]
+                for idx, file_info in enumerate(files_to_process):
+                    doc_label = st.session_state.file_labels[file_info["filename"]]
                     
                     with results_container:
-                        st.subheader(f"📄 Processing: {pdf_info['filename']}")
+                        file_type_icon = "📊" if file_info['file_type'] == 'excel' else "📄"
+                        st.subheader(f"{file_type_icon} Processing: {file_info['filename']}")
                         st.write(f"**Document Type:** `{doc_label}`")
+                        st.write(f"**File Type:** `{file_info['file_type'].upper()}`")
                         
                         with st.spinner(f"Processing {idx+1}/{len(files_to_process)}..."):
                             try:
-                                # Create a temporary pipeline for this file
-                                temp_pipeline = StreamlitRAGPipeline()
-                                temp_pipeline.setup_directories(pdf_info['full_path'], base_output_dir)
+                                # Handle Excel files differently
+                                if file_info['file_type'] == 'excel':
+                                    st.write("⏳ Uploading Excel workbook to premium calculator registry...")
+                                    
+                                    # Upload to premium registry via API
+                                    with open(file_info['full_path'], 'rb') as f:
+                                        files = {'excel': (file_info['filename'], f, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
+                                        data = {'doc_name': os.path.splitext(file_info['filename'])[0]}
+                                        
+                                        response = requests.post(
+                                            f"{DJANGO_API}/api/upload_premium_excel/",
+                                            files=files,
+                                            data=data,
+                                            timeout=30
+                                        )
+                                        
+                                        if response.status_code == 200:
+                                            result = response.json()
+                                            st.success(f"✅ {file_info['filename']} uploaded to premium registry!")
+                                            st.write(f"**Registry Path:** `{result.get('filename', 'N/A')}`")
+                                            successful += 1
+                                        else:
+                                            error_msg = response.json().get('error', 'Unknown error')
+                                            st.error(f"❌ Upload failed: {error_msg}")
+                                            failed += 1
                                 
-                                # Step 1: Extract tables
-                                st.write("⏳ Step 1: Extracting tables...")
-                                temp_pipeline.extract_tables()
-                                
-                                # Step 2: Extract text
-                                st.write("⏳ Step 2: Extracting text...")
-                                temp_pipeline.extract_text_content()
-                                
-                                # Step 3: Chunk and embed with document type
-                                st.write(f"⏳ Step 3: Chunking and embedding (type: {doc_label})...")
-                                chunker, message = temp_pipeline.chunk_and_embed(doc_label)
-                                
-                                if chunker:
-                                    collection_size = chunker.collection.count()
-                                    st.success(f"✅ {pdf_info['filename']} processed successfully! Collection size: {collection_size}")
-                                    successful += 1
+                                # Handle PDF files
                                 else:
-                                    st.error(f"❌ Chunking failed for {pdf_info['filename']}: {message}")
-                                    failed += 1
+                                    # Create a temporary pipeline for this file
+                                    temp_pipeline = StreamlitRAGPipeline()
+                                    temp_pipeline.setup_directories(file_info['full_path'], base_output_dir)
+                                    
+                                    # Step 1: Extract tables
+                                    st.write("⏳ Step 1: Extracting tables...")
+                                    temp_pipeline.extract_tables()
+                                    
+                                    # Step 2: Extract text
+                                    st.write("⏳ Step 2: Extracting text...")
+                                    temp_pipeline.extract_text_content()
+                                    
+                                    # Step 3: Chunk and embed with document type
+                                    st.write(f"⏳ Step 3: Chunking and embedding (type: {doc_label})...")
+                                    chunker, message = temp_pipeline.chunk_and_embed(doc_label)
+                                    
+                                    if chunker:
+                                        collection_size = chunker.collection.count()
+                                        st.success(f"✅ {file_info['filename']} processed successfully! Collection size: {collection_size}")
+                                        successful += 1
+                                    else:
+                                        st.error(f"❌ Chunking failed for {file_info['filename']}: {message}")
+                                        failed += 1
                                     
                             except Exception as e:
-                                st.error(f"❌ Error processing {pdf_info['filename']}: {str(e)}")
+                                st.error(f"❌ Error processing {file_info['filename']}: {str(e)}")
+                                import traceback
+                                st.code(traceback.format_exc())
                                 failed += 1
                         
                         st.divider()
@@ -621,13 +715,18 @@ def main():
                     st.metric("📁 Total", len(files_to_process))
                 
                 if successful > 0:
-                    st.success(f"🎉 Batch processing completed! {successful} documents added to the knowledge base.")
-                    st.info("💡 You can now query these documents in the Retrieval interface!")
+                    st.success(f"🎉 Batch processing completed! {successful} documents processed.")
+                    st.info("💡 PDFs are now in the knowledge base. Excel files are registered for premium calculations!")
                 
                 if failed > 0:
                     st.warning(f"⚠️ {failed} documents failed to process. Check the logs above for details.")
     
     elif uploaded_file is not None:
+        # Check if product name is provided
+        if not st.session_state.product_name or not st.session_state.product_name.strip():
+            st.error("❌ Please enter a Product Database Name in the sidebar before processing")
+            st.stop()
+        
         # Save uploaded file temporarily
         temp_pdf_path = os.path.join(base_output_dir, "temp", uploaded_file.name)
         os.makedirs(os.path.dirname(temp_pdf_path), exist_ok=True)

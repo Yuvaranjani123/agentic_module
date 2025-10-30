@@ -26,29 +26,55 @@ if 'conversation_history' not in st.session_state:
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # Auto-detect ChromaDB directories (relative path for portability)
+
+    # Auto-detect available product databases
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)  # Go up from frontend to project root
     base_output_dir = os.path.join(project_root, "media", "output")
     chroma_base_dir = os.path.join(base_output_dir, "chroma_db")
-    print("ChromaDB base directory:", chroma_base_dir)
-    # Get available ChromaDB directories
-    available_dirs = []
+    
+    # Detect all available product databases
+    available_products = []
     if os.path.exists(chroma_base_dir):
         for item in os.listdir(chroma_base_dir):
             item_path = os.path.join(chroma_base_dir, item)
-            if os.path.isdir(item_path):
-                available_dirs.append(item)
+            if os.path.isdir(item_path) and os.path.exists(os.path.join(item_path, "chroma.sqlite3")):
+                available_products.append(item)
     
-    if available_dirs:
-        selected_doc = st.selectbox(
-            "Select Document Collection",
-            available_dirs,
-            help="Choose which document collection to query"
-        )
-        chroma_db_dir = os.path.join(chroma_base_dir, selected_doc)
+    if available_products:
+        # Initialize product selection in session state
+        if 'selected_product' not in st.session_state:
+            st.session_state.selected_product = available_products[0]
+        
+        # Show product selector if multiple products exist
+        if len(available_products) > 1:
+            st.subheader("🏷️ Product Database")
+            selected_product = st.selectbox(
+                "Select Product:",
+                available_products,
+                index=available_products.index(st.session_state.selected_product) if st.session_state.selected_product in available_products else 0,
+                help="Choose which product database to search"
+            )
+            st.session_state.selected_product = selected_product
+            chroma_db_dir = os.path.join(chroma_base_dir, selected_product)
+            st.caption(f"💾 Database: `chroma_db/{selected_product}/`")
+        else:
+            # Single product - auto-select
+            st.session_state.selected_product = available_products[0]
+            chroma_db_dir = os.path.join(chroma_base_dir, available_products[0])
+            st.success(f"✅ **Product Database**: {available_products[0]}")
+            st.caption("📚 Searching across all documents in this product")
+        
+        # Show technical details in expander
+        with st.expander("🔧 Database Info", expanded=False):
+            st.write(f"**Product**: `{st.session_state.selected_product}`")
+            st.write(f"**Database Path**: `{chroma_db_dir}`")
+            st.write(f"**Collection Name**: `insurance_chunks`")
+            st.write(f"**Architecture**: Unified database with all documents")
+            st.caption("💡 All documents are indexed together with metadata-based filtering")
     else:
-        st.warning("⚠️ No ChromaDB collections found")
+        st.error("❌ No product databases found")
+        st.info("Please ingest documents first using the Ingestion interface")
         chroma_db_dir = st.text_input(
             "ChromaDB Directory (Manual)",
             value="",
@@ -201,97 +227,168 @@ if st.button("🔍 Search", type="primary") and query:
                 if response.status_code == 200:
                     result = response.json()
                     
+                    # Detect which agent handled the query
+                    agent_type = result.get('agent', 'retrieval')
+                    intent = result.get('intent', 'unknown')
+                    
                     # Add to conversation history
+                    answer_text = result.get("answer", "")
                     st.session_state.conversation_history.append({
                         "query": query,
-                        "answer": result["answer"]
+                        "answer": answer_text,
+                        "agent": agent_type
                     })
                     
-                    st.subheader("📌 Answer")
-                    st.write(result["answer"])
-                    
-                    st.subheader("📑 Sources")
-                    
-                    # Display evaluation metrics if available
-                    if enable_evaluation and "evaluation" in result:
-                        st.subheader("📊 Retrieval Evaluation")
-                        eval_data = result["evaluation"]
-                        
-                        if not eval_data.get("error"):
-                            # Create metrics columns
-                            eval_col1, eval_col2, eval_col3 = st.columns(3)
-                            
-                            with eval_col1:
-                                if "term_coverage" in eval_data:
-                                    st.metric("Term Coverage", f"{eval_data['term_coverage']:.1%}")
-                                if "avg_semantic_similarity" in eval_data:
-                                    st.metric("Avg Similarity", f"{eval_data['avg_semantic_similarity']:.3f}")
-                            
-                            with eval_col2:
-                                if "query_coverage" in eval_data:
-                                    st.metric("Query Coverage", f"{eval_data['query_coverage']:.1%}")
-                                if "diversity" in eval_data:
-                                    st.metric("Diversity", f"{eval_data['diversity']:.3f}")
-                            
-                            with eval_col3:
-                                if "covered_terms" in eval_data:
-                                    st.metric("Covered Terms", f"{len(eval_data['covered_terms'])}/{eval_data.get('total_terms', 0)}")
-                            
-                            # Show covered terms if available
-                            if eval_data.get("covered_terms"):
-                                with st.expander("🔍 Query Term Analysis"):
-                                    st.write("**Covered Terms:**", ", ".join(eval_data["covered_terms"]))
-                                    
-                            # Show semantic similarities if available
-                            if eval_data.get("semantic_similarities"):
-                                with st.expander("🧠 Semantic Similarity Scores"):
-                                    similarities = eval_data["semantic_similarities"]
-                                    for i, sim in enumerate(similarities, 1):
-                                        st.write(f"Source {i}: {sim:.3f}")
-                        else:
-                            st.error(f"Evaluation Error: {eval_data['error']}")
-                    
-                    if result["sources"]:
-                        for i, source in enumerate(result["sources"], 1):
-                            # Enhanced source header with document type badge
-                            source_type = source.get('type', 'Unknown')
-                            doc_type_display = source.get('metadata', {}).get('doc_type', 'unknown')
-                            
-                            # Format doc type as prominent badge
-                            doc_type_badge = doc_type_display.upper()
-                            source_header = f"Source {i} - {source_type.title()} • 📄 {doc_type_badge}"
-                                
-                            with st.expander(source_header):
-                                # Source metadata
-                                col1, col2 = st.columns(2)
-                                
-                                with col1:
-                                    if source.get('page'):
-                                        st.write(f"**Page:** {source['page']}")
-                                    if source.get('table'):
-                                        st.write(f"**Table:** {source['table']}")
-                                    if source.get('row_index') is not None:
-                                        st.write(f"**Row:** {source['row_index']}")
-                                
-                                with col2:
-                                    st.write(f"**Type:** {source.get('type', 'Unknown')}")
-                                    if source.get('chunking_method'):
-                                        st.write(f"**Chunking:** {source['chunking_method'].upper()}")
-                                    if source.get('chunk_idx') is not None:
-                                        st.write(f"**Chunk ID:** {source['chunk_idx']}")
-                                
-                                # Content
-                                st.write("**Content:**")
-                                content = source.get('content', '')
-                                if len(content) > 500:
-                                    st.write(content[:500] + "...")
-                                    # Show full content in a text area instead of nested expander
-                                    if st.button(f"Show full content {i}", key=f"show_full_{i}"):
-                                        st.text_area("Full Content", content, height=200, key=f"full_content_{i}")
-                                else:
-                                    st.write(content)
+                    # Display agent badge
+                    if agent_type == 'premium_calculator':
+                        st.info(f"🤖 **Agent:** Premium Calculator • **Intent:** {intent}")
                     else:
-                        st.info("No sources found")
+                        st.info(f"🤖 **Agent:** Document Retrieval • **Intent:** {intent}")
+                    
+                    # Handle Premium Calculator Results
+                    if agent_type == 'premium_calculator':
+                        st.subheader("💰 Premium Calculation Result")
+                        
+                        # Check if we have full calculation or need more info
+                        if 'total_premium' in result:
+                            # Display premium breakdown
+                            st.success(f"### Total Premium: ₹{result['total_premium']:,.0f}")
+                            
+                            # Create metrics columns
+                            col1, col2, col3 = st.columns(3)
+                            
+                            with col1:
+                                st.metric("Policy Type", result.get('policy_type', 'N/A').replace('_', ' ').title())
+                            with col2:
+                                st.metric("Gross Premium", f"₹{result.get('gross_premium', 0):,.0f}")
+                            with col3:
+                                gst_rate = result.get('gst_rate', 0.18)
+                                gst_amount = result.get('gst_amount', 0)
+                                st.metric(f"GST ({gst_rate*100:.0f}%)", f"₹{gst_amount:,.0f}")
+                            
+                            # Display composition and sum insured
+                            if result.get('composition'):
+                                st.write(f"**Composition:** {result['composition']}")
+                            st.write(f"**Sum Insured:** ₹{result.get('sum_insured', 0):,.0f}")
+                            
+                            # Display detailed breakdown
+                            if result.get('breakdown'):
+                                with st.expander("📋 Premium Breakdown Details", expanded=True):
+                                    breakdown_data = result['breakdown']
+                                    
+                                    # Create table
+                                    import pandas as pd
+                                    df = pd.DataFrame(breakdown_data)
+                                    
+                                    # Format premium column
+                                    if 'premium' in df.columns:
+                                        df['premium'] = df['premium'].apply(lambda x: f"₹{x:,.0f}")
+                                    
+                                    st.dataframe(df, use_container_width=True, hide_index=True)
+                            
+                            # Show calculation source
+                            if result.get('sheet_used'):
+                                st.caption(f"📊 Sheet Used: `{result['sheet_used']}`")
+                            if result.get('age_band'):
+                                st.caption(f"� Age Band: `{result['age_band']}`")
+                        
+                        else:
+                            # Missing parameters - show clarifying message
+                            st.warning("### Need More Information")
+                            st.write(answer_text)
+                            
+                            if result.get('extracted_params'):
+                                with st.expander("🔍 Extracted Parameters"):
+                                    st.json(result['extracted_params'])
+                    
+                    # Handle Document Retrieval Results
+                    else:
+                        st.subheader("📌 Answer")
+                        st.write(answer_text)
+                        
+                        st.subheader("📑 Sources")
+                        
+                        # Display sources for document retrieval
+                        if result.get("sources"):
+                            for i, source in enumerate(result["sources"], 1):
+                                # Enhanced source header with document type badge
+                                source_type = source.get('type', 'Unknown')
+                                doc_type_display = source.get('metadata', {}).get('doc_type', 'unknown')
+                                
+                                # Format doc type as prominent badge
+                                doc_type_badge = doc_type_display.upper()
+                                source_header = f"Source {i} - {source_type.title()} • 📄 {doc_type_badge}"
+                                    
+                                with st.expander(source_header):
+                                    # Source metadata
+                                    col1, col2 = st.columns(2)
+                                    
+                                    with col1:
+                                        if source.get('page'):
+                                            st.write(f"**Page:** {source['page']}")
+                                        if source.get('table'):
+                                            st.write(f"**Table:** {source['table']}")
+                                        if source.get('row_index') is not None:
+                                            st.write(f"**Row:** {source['row_index']}")
+                                    
+                                    with col2:
+                                        st.write(f"**Type:** {source.get('type', 'Unknown')}")
+                                        if source.get('chunking_method'):
+                                            st.write(f"**Chunking:** {source['chunking_method'].upper()}")
+                                        if source.get('chunk_idx') is not None:
+                                            st.write(f"**Chunk ID:** {source['chunk_idx']}")
+                                    
+                                    # Content
+                                    st.write("**Content:**")
+                                    content = source.get('content', '')
+                                    if len(content) > 500:
+                                        st.write(content[:500] + "...")
+                                        # Show full content in a text area instead of nested expander
+                                        if st.button(f"Show full content {i}", key=f"show_full_{i}"):
+                                            st.text_area("Full Content", content, height=200, key=f"full_content_{i}")
+                                    else:
+                                        st.write(content)
+                        else:
+                            st.info("No sources found")
+                        
+                        # Display evaluation metrics if available (only for document retrieval)
+                        if enable_evaluation and result.get("evaluation"):
+                            st.subheader("📊 Retrieval Evaluation")
+                            eval_data = result["evaluation"]
+                            
+                            if not eval_data.get("error"):
+                                # Create metrics columns
+                                eval_col1, eval_col2, eval_col3 = st.columns(3)
+                                
+                                with eval_col1:
+                                    if "term_coverage" in eval_data:
+                                        st.metric("Term Coverage", f"{eval_data['term_coverage']:.1%}")
+                                    if "avg_semantic_similarity" in eval_data:
+                                        st.metric("Avg Similarity", f"{eval_data['avg_semantic_similarity']:.3f}")
+                                
+                                with eval_col2:
+                                    if "query_coverage" in eval_data:
+                                        st.metric("Query Coverage", f"{eval_data['query_coverage']:.1%}")
+                                    if "diversity" in eval_data:
+                                        st.metric("Diversity", f"{eval_data['diversity']:.3f}")
+                                
+                                with eval_col3:
+                                    if "covered_terms" in eval_data:
+                                        st.metric("Covered Terms", f"{len(eval_data['covered_terms'])}/{eval_data.get('total_terms', 0)}")
+                                
+                                # Show covered terms if available
+                                if eval_data.get("covered_terms"):
+                                    with st.expander("🔍 Query Term Analysis"):
+                                        st.write("**Covered Terms:**", ", ".join(eval_data["covered_terms"]))
+                                        
+                                # Show semantic similarities if available
+                                if eval_data.get("semantic_similarities"):
+                                    with st.expander("🧠 Semantic Similarity Scores"):
+                                        similarities = eval_data["semantic_similarities"]
+                                        for i, sim in enumerate(similarities, 1):
+                                            st.write(f"Source {i}: {sim:.3f}")
+                            else:
+                                st.error(f"Evaluation Error: {eval_data['error']}")
                         
                 else:
                     error_msg = response.json().get("error", "Unknown error") if response.headers.get('content-type') == 'application/json' else response.text
@@ -310,26 +407,38 @@ st.divider()
 if len(st.session_state.conversation_history) > 0:
     with st.expander(f"💬 Conversation History ({len(st.session_state.conversation_history)} exchanges)", expanded=False):
         for i, exchange in enumerate(reversed(st.session_state.conversation_history[:-1]), 1):  # Exclude current
-            st.markdown(f"**Q{len(st.session_state.conversation_history) - i}:** {exchange['query']}")
+            agent_icon = "💰" if exchange.get('agent') == 'premium_calculator' else "📄"
+            st.markdown(f"{agent_icon} **Q{len(st.session_state.conversation_history) - i}:** {exchange['query']}")
             st.markdown(f"**A{len(st.session_state.conversation_history) - i}:** {exchange['answer'][:200]}...")
             st.divider()
 
 st.subheader("💡 Sample Queries")
 
-sample_queries = [
-    "What vaccinations are covered for children?",
-    "What is the claim process for hospitalization?", 
-    "What are the annual check-up benefits?",
-    "What is the family floater coverage?",
-    "What are the premium payment options?",
-    "What documents are required for claims?",
-    "What is the waiting period for pre-existing conditions?",
-    "What are the exclusions in the policy?"
-]
+# Organize queries by category
+col1, col2 = st.columns(2)
 
-cols = st.columns(3)
-for i, sample in enumerate(sample_queries):
-    with cols[i % 3]:
-        if st.button(f"📝 {sample}", key=f"sample_{i}"):
+with col1:
+    st.markdown("**📄 Document Questions**")
+    doc_queries = [
+        "What vaccinations are covered for children?",
+        "What is the claim process for hospitalization?", 
+        "What are the annual check-up benefits?",
+        "What are the exclusions in the policy?"
+    ]
+    for i, sample in enumerate(doc_queries):
+        if st.button(f"📝 {sample}", key=f"doc_sample_{i}", use_container_width=True):
+            st.session_state.selected_query = sample
+            st.rerun()
+
+with col2:
+    st.markdown("**💰 Premium Calculations**")
+    premium_queries = [
+        "Calculate premium for 35 year old with 5L cover",
+        "Premium for 2 adults aged 30, 35 with 10L cover",
+        "How much for family floater 2 adults + 1 child, ages 40, 38, 7 with 10L",
+        "What is the cost for individual aged 50 with 20L coverage"
+    ]
+    for i, sample in enumerate(premium_queries):
+        if st.button(f"� {sample}", key=f"premium_sample_{i}", use_container_width=True):
             st.session_state.selected_query = sample
             st.rerun()

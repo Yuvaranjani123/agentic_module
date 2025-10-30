@@ -58,10 +58,27 @@ class RetrievalAgent:
         
         logger.info(f"RetrievalAgent initialized with ChromaDB at: {chroma_db_dir}")
     
+    def _detect_premium_calculation_intent(self, query_text: str) -> bool:
+        """
+        Detect if query is asking for premium calculation.
+        
+        Returns:
+            True if query is a premium calculation request
+        """
+        query_lower = query_text.lower()
+        premium_keywords = [
+            'calculate premium', 'premium calculation', 'how much premium',
+            'premium for', 'cost of insurance', 'insurance cost',
+            'what is the premium', 'compute premium', 'premium amount',
+            'how much will i pay', 'price for insurance'
+        ]
+        return any(keyword in query_lower for keyword in premium_keywords)
+    
     def query(self, query_text: str, k: int = 5, doc_type_filter = None, 
               exclude_doc_types = None, evaluate_retrieval: bool = False, conversation_id: str = None):
         """
         Query documents and generate an answer with conversation memory support.
+        Routes premium calculation requests to deterministic calculator.
         
         Args:
             query_text: User's question
@@ -76,15 +93,36 @@ class RetrievalAgent:
         """
         logger.info(f"Agent querying: '{query_text}' with k={k}, doc_type={doc_type_filter}, exclude={exclude_doc_types}, conv_id={conversation_id}")
         
-        # Build conversation context if history exists
-        conversation_context = self._build_conversation_context()
+        # Check if this is a premium calculation request
+        if self._detect_premium_calculation_intent(query_text):
+            logger.info("Detected premium calculation intent - routing to premium calculator agent")
+            return {
+                "answer": "I've detected this is a premium calculation request. Please use the premium calculator endpoints:\n\n"
+                         "• `/agents/premium/individual/` for individual policies\n"
+                         "• `/agents/premium/family-floater/` for family floater policies\n"
+                         "• `/agents/premium/calculate/` for smart routing\n\n"
+                         "Provide:\n"
+                         "- Policy type (individual or family_floater)\n"
+                         "- Member ages\n"
+                         "- Sum insured (e.g., '5L' or 500000)\n\n"
+                         "Example: For 2 adults aged 35 and 40 with ₹5L cover, POST to `/agents/premium/individual/` with:\n"
+                         '```json\n{"members": [{"age": 35}, {"age": 40}], "sum_insured": "5L"}\n```',
+                "sources": [],
+                "conversation_id": conversation_id,
+                "agent_type": "premium_calculator_router",
+                "evaluation": None
+            }
         
-        # Enhance query with conversation context for better retrieval
+        # Build conversation context if history exists
+        # Only use context if current query seems related to previous conversations
+        conversation_context = self._build_conversation_context_if_relevant(query_text)
+        
+        # Enhance query with conversation context for better retrieval (only if relevant)
         enhanced_query = query_text
         if conversation_context:
             # For retrieval, combine recent context with current query
             enhanced_query = f"{conversation_context}\n\nCurrent question: {query_text}"
-            logger.info(f"Enhanced query with conversation context")
+            logger.info(f"Enhanced query with relevant conversation context")
         
         # Step 1: Get query embedding (use enhanced query for better context)
         try:
@@ -270,6 +308,78 @@ class RetrievalAgent:
             context_parts.append(f"A{i}: {exchange['answer'][:200]}...")  # Truncate long answers
         
         return "\n".join(context_parts)
+    
+    def _build_conversation_context_if_relevant(self, current_query: str, max_history: int = 2):
+        """
+        Build conversation context only if it's relevant to the current query.
+        This prevents premium calculation context from polluting document retrieval queries.
+        
+        Args:
+            current_query: The current user question
+            max_history: Maximum number of recent exchanges to include
+            
+        Returns:
+            Formatted conversation context string (empty if not relevant)
+        """
+        if not self.conversation_history:
+            return ""
+        
+        # Detect query type
+        query_lower = current_query.lower()
+        
+        # Premium/calculation keywords
+        premium_keywords = ['premium', 'cost', 'price', 'calculate', 'how much', 'pay', 'coverage amount']
+        is_premium_query = any(kw in query_lower for kw in premium_keywords)
+        
+        # Document/policy keywords
+        document_keywords = ['what is', 'what are', 'explain', 'describe', 'tell me about', 
+                            'benefits', 'coverage', 'claim', 'process', 'eligible', 'covered',
+                            'exclusions', 'terms', 'conditions', 'policy', 'plan']
+        is_document_query = any(kw in query_lower for kw in document_keywords)
+        
+        # Pronoun/reference keywords (indicates follow-up)
+        followup_keywords = ['it', 'this', 'that', 'these', 'those', 'the plan', 'the policy',
+                            'same', 'also', 'additionally', 'what about', 'how about']
+        is_followup = any(kw in query_lower for kw in followup_keywords)
+        
+        # Get recent history
+        recent_history = self.conversation_history[-max_history:]
+        
+        # Check if recent history is about same topic
+        recent_is_premium = False
+        recent_is_document = False
+        
+        for exchange in recent_history:
+            prev_q = exchange['question'].lower()
+            if any(kw in prev_q for kw in premium_keywords):
+                recent_is_premium = True
+            if any(kw in prev_q for kw in document_keywords):
+                recent_is_document = True
+        
+        # Decision logic:
+        # 1. If current query is a clear follow-up (uses pronouns), include context
+        if is_followup:
+            logger.info("Including context: Query is a follow-up (uses pronouns/references)")
+            return self._build_conversation_context(max_history)
+        
+        # 2. If topic switches from premium to document questions, DON'T include context
+        if recent_is_premium and is_document_query:
+            logger.info("Excluding context: Topic switched from premium to document questions")
+            return ""
+        
+        # 3. If topic switches from document to premium questions, DON'T include context
+        if recent_is_document and is_premium_query:
+            logger.info("Excluding context: Topic switched from document to premium questions")
+            return ""
+        
+        # 4. If same topic type, include context
+        if (recent_is_premium and is_premium_query) or (recent_is_document and is_document_query):
+            logger.info(f"Including context: Same topic type (premium={is_premium_query}, doc={is_document_query})")
+            return self._build_conversation_context(max_history)
+        
+        # 5. Default: no context for unambiguous queries
+        logger.info("Excluding context: Query is clear and self-contained")
+        return ""
     
     def _add_to_history(self, question: str, answer: str):
         """
