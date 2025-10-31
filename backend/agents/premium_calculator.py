@@ -127,16 +127,43 @@ class PremiumCalculator:
     
     def _parse_age_band(self, age_band: str) -> Tuple[int, Optional[int]]:
         """
-        Parse age band string to (lower, upper) bounds.
+        Parse age band string to (lower, upper) bounds in YEARS.
+        Handles both exact ages, age ranges, and days (converts to years).
         
         Examples:
-            "18-25" -> (18, 25)
-            "76+" -> (76, None)
-            "> 75" -> (76, None)
+            "18-25" -> (18, 25)      # Age band in years
+            "35" -> (35, 35)         # Exact age in years
+            "76+" -> (76, None)      # Open-ended
+            "> 75" -> (76, None)     # Greater than
+            "91 days" -> (0, 0)      # Days (< 1 year) -> age 0
+            "91days" -> (0, 0)       # Days without space
+            "91-365 days" -> (0, 0)  # Day range (< 1 year) -> age 0
+            "1-5" -> (1, 5)          # Years
         
         Returns:
             (lower_bound, upper_bound) where upper_bound is None for open-ended
+            Both bounds are in YEARS
         """
+        age_band = str(age_band).strip().lower()  # Convert to lowercase for matching
+        
+        # Handle age in DAYS (infants/newborns)
+        # Pattern: "91 days", "91days", "91-180 days", etc.
+        if 'day' in age_band:
+            # Extract numeric values from the days pattern
+            day_match = re.search(r'(\d+)\s*-?\s*(\d+)?\s*days?', age_band)
+            if day_match:
+                lower_days = int(day_match.group(1))
+                upper_days = int(day_match.group(2)) if day_match.group(2) else lower_days
+                
+                # Convert days to years (365 days = 1 year)
+                # For infants < 1 year, we represent as age 0
+                lower_years = lower_days // 365  # Integer division
+                upper_years = upper_days // 365
+                
+                logger.debug(f"Parsed days: '{age_band}' -> {lower_days}-{upper_days} days -> age {lower_years}-{upper_years} years")
+                return (lower_years, upper_years)
+        
+        # Restore original for year-based parsing
         age_band = str(age_band).strip()
         
         # Handle open-ended bands: "76+", "> 75", ">=76"
@@ -154,17 +181,23 @@ class PremiumCalculator:
         if match:
             return (int(match.group(1)), int(match.group(2)))
         
-        # Single number fallback
-        match = re.match(r'(\d+)', age_band)
+        # Handle exact age: "35", "40", etc. (single number without range)
+        # This supports age-wise premium sheets where each row is a specific age
+        match = re.match(r'^(\d+)$', age_band)
         if match:
             num = int(match.group(1))
-            return (num, num)
+            return (num, num)  # Exact age match (lower = upper)
         
         raise ValueError(f"Cannot parse age band: {age_band}")
     
     def _find_age_band_row(self, df: pd.DataFrame, age: int) -> Optional[int]:
         """
         Find the row index in dataframe that matches the given age.
+        Intelligently handles both exact age and age band formats.
+        
+        Examples:
+            - Exact age sheet: Age Band column has "18", "19", "20", ...
+            - Age band sheet: Age Band column has "18-25", "26-35", ...
         
         Args:
             df: DataFrame with 'Age Band' column
@@ -177,16 +210,27 @@ class PremiumCalculator:
         if age_col not in df.columns:
             raise ValueError(f"DataFrame missing '{age_col}' column")
         
+        # First pass: try to find exact age match (for age-wise premium sheets)
         for idx, row in df.iterrows():
             age_band_str = str(row[age_col]).strip()
             try:
                 lower, upper = self._parse_age_band(age_band_str)
-                if upper is None:  # Open-ended
+                # Exact match for single-age rows
+                if lower == upper == age:
+                    return idx
+            except ValueError:
+                continue
+        
+        # Second pass: find age band range that contains the age
+        for idx, row in df.iterrows():
+            age_band_str = str(row[age_col]).strip()
+            try:
+                lower, upper = self._parse_age_band(age_band_str)
+                if upper is None:  # Open-ended (e.g., "76+")
                     if age >= lower:
                         return idx
-                else:  # Range
-                    if lower <= age <= upper:
-                        return idx
+                elif lower <= age <= upper:  # Range (e.g., "18-25")
+                    return idx
             except ValueError as e:
                 logger.warning(f"Skipping unparseable age band '{age_band_str}': {e}")
                 continue
@@ -272,6 +316,39 @@ class PremiumCalculator:
         logger.info(f"Using highest column {highest_col} for requested {sum_insured}")
         return highest_col
     
+    def _detect_sheet_age_format(self, df: pd.DataFrame) -> str:
+        """
+        Detect whether a sheet uses exact ages or age bands.
+        
+        Args:
+            df: DataFrame with 'Age Band' column
+            
+        Returns:
+            'exact' if sheet has exact ages (18, 19, 20...)
+            'bands' if sheet has age ranges (18-25, 26-35...)
+        """
+        age_col = 'Age Band'
+        if age_col not in df.columns:
+            return 'unknown'
+        
+        # Sample first few rows to detect format
+        sample_size = min(5, len(df))
+        band_count = 0
+        exact_count = 0
+        
+        for idx in range(sample_size):
+            age_band_str = str(df.iloc[idx][age_col]).strip()
+            try:
+                lower, upper = self._parse_age_band(age_band_str)
+                if lower == upper:
+                    exact_count += 1
+                else:
+                    band_count += 1
+            except ValueError:
+                continue
+        
+        return 'exact' if exact_count > band_count else 'bands'
+    
     def _lookup_premium(self, sheet_name: str, age: int, sum_insured: int) -> Optional[float]:
         """
         Lookup premium from a specific sheet.
@@ -290,11 +367,20 @@ class PremiumCalculator:
         
         df = self.sheets[sheet_name]
         
-        # Find row by age
+        # Detect and log sheet format for debugging
+        age_format = self._detect_sheet_age_format(df)
+        logger.debug(f"Sheet '{sheet_name}' detected as '{age_format}' age format")
+        
+        # Find row by age (handles both exact ages and age bands)
         row_idx = self._find_age_band_row(df, age)
         if row_idx is None:
-            logger.error(f"No age band found for age {age} in sheet '{sheet_name}'")
+            logger.error(f"No age match found for age {age} in sheet '{sheet_name}' "
+                        f"(format: {age_format})")
             return None
+        
+        # Get the matched age band for logging
+        age_band_matched = str(df.loc[row_idx, 'Age Band']).strip()
+        logger.debug(f"Age {age} matched to row '{age_band_matched}' in sheet '{sheet_name}'")
         
         # Find column by sum insured
         col_name = self._find_sum_insured_column(df, sum_insured)
@@ -307,8 +393,14 @@ class PremiumCalculator:
             premium = df.loc[row_idx, col_name]
             # Clean numeric value (remove any formatting)
             if pd.isna(premium):
+                logger.warning(f"Premium value is NaN for [{age_band_matched}, {col_name}] "
+                             f"in sheet '{sheet_name}'")
                 return None
-            return float(premium)
+            premium_value = float(premium)
+            logger.info(f"Premium lookup successful: Sheet='{sheet_name}', Age={age} "
+                       f"(matched '{age_band_matched}'), SumInsured={sum_insured} (column '{col_name}'), "
+                       f"Premium=₹{premium_value:,.0f}")
+            return premium_value
         except Exception as e:
             logger.error(f"Error reading premium from [{row_idx}, {col_name}]: {e}")
             return None

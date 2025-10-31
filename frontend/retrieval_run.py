@@ -21,6 +21,8 @@ if 'conversation_id' not in st.session_state:
     st.session_state.conversation_id = str(uuid.uuid4())
 if 'conversation_history' not in st.session_state:
     st.session_state.conversation_history = []
+if 'compare_products' not in st.session_state:
+    st.session_state.compare_products = []
 
 # Configuration sidebar
 with st.sidebar:
@@ -72,6 +74,40 @@ with st.sidebar:
             st.write(f"**Collection Name**: `insurance_chunks`")
             st.write(f"**Architecture**: Unified database with all documents")
             st.caption("💡 All documents are indexed together with metadata-based filtering")
+        
+        # Policy Comparison Section (only if multiple products)
+        if len(available_products) > 1:
+            st.divider()
+            st.subheader("🔄 Policy Comparison")
+            st.caption("Compare multiple insurance products")
+            
+            # Multi-select for products to compare
+            compare_products = st.multiselect(
+                "Select products to compare:",
+                options=available_products,
+                default=available_products[:2] if len(available_products) >= 2 else available_products,
+                help="Choose 2 or more products to compare"
+            )
+            
+            # Store in session state for query construction
+            st.session_state.compare_products = compare_products
+            
+            if len(compare_products) >= 2:
+                st.success(f"✅ Ready to compare {len(compare_products)} products")
+                st.caption(f"Products: {', '.join(compare_products)}")
+            elif len(compare_products) == 1:
+                st.info("ℹ️ Select at least 2 products for comparison")
+            
+            with st.expander("💡 Comparison Tips", expanded=False):
+                st.markdown("""
+                **How to ask comparison questions:**
+                - "Compare these policies on coverage and premium"
+                - "What are the differences in maternity benefits?"
+                - "Which policy has better claim process?"
+                - "Compare exclusions across all products"
+                
+                The system will automatically compare the selected products.
+                """)
     else:
         st.error("❌ No product databases found")
         st.info("Please ingest documents first using the Ingestion interface")
@@ -80,6 +116,7 @@ with st.sidebar:
             value="",
             help="Manually enter the path to your ChromaDB directory"
         )
+        st.session_state.compare_products = []
     
     k_results = st.slider("Number of results", min_value=1, max_value=20, value=5)
     
@@ -190,10 +227,17 @@ with st.sidebar:
         st.error(f"❌ Agent API not accessible: {str(e)}")
 
 # Main query interface
+st.divider()
+
+# Show comparison hint if multiple products selected
+if st.session_state.compare_products and len(st.session_state.compare_products) >= 2:
+    st.info(f"🔄 **Comparison Mode Active** - Comparing: {', '.join(st.session_state.compare_products)}")
+    st.caption("Ask comparison questions like: 'What are the differences in coverage?' or 'Which has better maternity benefits?'")
+
 query = st.text_input(
     "Ask a question about the insurance document:",
     value=st.session_state.selected_query,
-    placeholder="e.g., What vaccinations are covered for children?"
+    placeholder="e.g., What vaccinations are covered for children? OR Compare these policies on premium and coverage"
 )
 
 if st.button("🔍 Search", type="primary") and query:
@@ -210,6 +254,10 @@ if st.button("🔍 Search", type="primary") and query:
                     "evaluate": enable_evaluation,
                     "conversation_id": st.session_state.conversation_id  # Add conversation ID
                 }
+                
+                # Add comparison products if any selected
+                if st.session_state.compare_products and len(st.session_state.compare_products) >= 2:
+                    api_payload["compare_products"] = st.session_state.compare_products
                 
                 # Add document type filters
                 if doc_type_filter:
@@ -242,11 +290,70 @@ if st.button("🔍 Search", type="primary") and query:
                     # Display agent badge
                     if agent_type == 'premium_calculator':
                         st.info(f"🤖 **Agent:** Premium Calculator • **Intent:** {intent}")
+                    elif agent_type == 'comparison':
+                        st.info(f"🤖 **Agent:** Policy Comparison • **Intent:** {intent}")
                     else:
                         st.info(f"🤖 **Agent:** Document Retrieval • **Intent:** {intent}")
                     
+                    # Handle Policy Comparison Results
+                    if agent_type == 'comparison':
+                        st.subheader("🔄 Policy Comparison Result")
+                        
+                        products_compared = result.get('products_compared', [])
+                        comparison_type = result.get('comparison_type', 'document_only')
+                        
+                        if products_compared:
+                            st.success(f"**Compared Products:** {', '.join(products_compared)}")
+                        
+                        # Show comparison type badge
+                        if comparison_type == 'with_premiums':
+                            st.info("✨ **Enhanced with Premium Calculations**")
+                        else:
+                            aspects = result.get('aspects')
+                            if aspects:
+                                st.caption(f"**Comparison Aspects:** {', '.join(aspects)}")
+                        
+                        # If premium calculations included, show them separately
+                        if comparison_type == 'with_premiums' and 'premium_calculations' in result:
+                            st.subheader("💰 Premium Comparison")
+                            
+                            premium_calcs = result.get('premium_calculations', {})
+                            
+                            # Create columns for each product
+                            cols = st.columns(len(premium_calcs))
+                            
+                            for idx, (product, calc_data) in enumerate(premium_calcs.items()):
+                                with cols[idx]:
+                                    st.markdown(f"**{product}**")
+                                    if calc_data.get('error'):
+                                        st.error(f"⚠️ {calc_data['error']}")
+                                    else:
+                                        total = calc_data.get('total_premium', 0)
+                                        base = calc_data.get('base_premium', 0)
+                                        gst = calc_data.get('gst_amount', 0)
+                                        
+                                        st.metric("Total Premium", f"₹{total:,.0f}")
+                                        st.caption(f"Base: ₹{base:,.0f}")
+                                        st.caption(f"GST: ₹{gst:,.0f}")
+                            
+                            st.divider()
+                        
+                        # Display comparison answer
+                        st.markdown(answer_text)
+                        
+                        # Handle missing parameters case
+                        if 'missing_params' in result:
+                            st.warning("⚠️ **Additional Information Needed**")
+                            st.info("Please provide the missing details in your next query to get premium calculations.")
+                        
+                        # Show available products info
+                        with st.expander("ℹ️ Available Products", expanded=False):
+                            available = result.get('available_products', [])
+                            st.write(f"**All Available Products:** {', '.join(available)}")
+                            st.caption("You can compare any of these products using the sidebar selector")
+                    
                     # Handle Premium Calculator Results
-                    if agent_type == 'premium_calculator':
+                    elif agent_type == 'premium_calculator':
                         st.subheader("💰 Premium Calculation Result")
                         
                         # Check if we have full calculation or need more info

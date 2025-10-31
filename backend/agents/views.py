@@ -8,6 +8,7 @@ import logging
 import os
 from logs.utils import setup_logging
 from .retrieval_agent import RetrievalAgent
+from .comparison_agent import PolicyComparisonAgent
 from .orchestrator import AgentOrchestrator
 from .premium_calculator import PremiumCalculator
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Store active agent sessions (in production, use Redis or database)
 _agent_sessions = {}
+_comparison_agent = None  # Singleton comparison agent
 _orchestrator = None  # Singleton orchestrator
 _premium_calculator = None  # Singleton premium calculator
 
@@ -69,6 +71,25 @@ def get_premium_calculator():
                     "No premium workbook available. Please upload one via /api/upload_premium_excel/"
                 )
     return _premium_calculator
+
+
+def get_comparison_agent(chroma_base_dir: str):
+    """Get or create singleton comparison agent."""
+    global _comparison_agent
+    if _comparison_agent is None:
+        # Get premium calculator if available
+        try:
+            calculator = get_premium_calculator()
+        except:
+            calculator = None
+            logger.warning("Premium calculator not available for comparison agent")
+        
+        _comparison_agent = PolicyComparisonAgent(
+            chroma_base_dir=chroma_base_dir,
+            premium_calculator=calculator
+        )
+        logger.info(f"Created comparison agent with base dir: {chroma_base_dir}")
+    return _comparison_agent
 
 
 @api_view(['POST'])
@@ -147,6 +168,116 @@ def agent_query(request):
                               "Example: 'Calculate premium for 2 adults aged 35 and 40 with 1 child aged 7, sum insured 10L'",
                     'missing_params': ['members', 'sum_insured'] if not params.get('members') else ['sum_insured'],
                     'extracted_params': params
+                }, status=status.HTTP_200_OK)
+        
+        # Route to comparison agent
+        elif routing_decision['agent'] == 'comparison':
+            # Get chroma base directory (parent of all product databases)
+            if chroma_db_dir:
+                chroma_base_dir = os.path.dirname(chroma_db_dir)
+            else:
+                # Default to media/output/chroma_db
+                chroma_base_dir = os.path.join("media", "output", "chroma_db")
+            
+            comparison_agent = get_comparison_agent(chroma_base_dir)
+            available_products = comparison_agent.get_available_products()
+            
+            if len(available_products) < 2:
+                return Response({
+                    'agent': 'comparison',
+                    'intent': routing_decision['intent'],
+                    'query': query_text,
+                    'answer': f"I need at least 2 insurance products to make a comparison. Currently, I only have access to: {available_products}.\n\n"
+                              f"Please ingest more products using the Ingestion interface with different product names.",
+                    'available_products': available_products,
+                    'error': 'insufficient_products'
+                }, status=status.HTTP_200_OK)
+            
+            # Extract comparison parameters
+            params = orchestrator.extract_comparison_params(query_text, available_products)
+            
+            # Determine which products to compare
+            products_to_compare = params.get('products')
+            if not products_to_compare or len(products_to_compare) < 2:
+                products_to_compare = available_products  # Compare all if not specified
+            
+            # Initialize aspects variable (may be used later)
+            aspects = params.get('aspects')
+            
+            # Check if query mentions premium/cost/price - indicates need for premium calculation
+            premium_keywords = ['premium', 'cost', 'price', 'how much', 'expensive', 'cheaper', 'affordable']
+            needs_premium_calc = any(keyword in query_text.lower() for keyword in premium_keywords)
+            
+            # If premium calculation is needed, try to extract premium params
+            if needs_premium_calc and comparison_agent.premium_calculator:
+                logger.info("Premium comparison detected - attempting to extract parameters")
+                premium_params = orchestrator.extract_premium_params(query_text)
+                
+                # If we have sufficient params, do premium comparison
+                if premium_params.get('members') and premium_params.get('sum_insured'):
+                    members = [{'age': age} for age in premium_params['members']]
+                    result = comparison_agent.compare_with_premium_calculation(
+                        query=query_text,
+                        product_names=products_to_compare,
+                        premium_params={
+                            'policy_type': premium_params.get('policy_type', 'family_floater'),
+                            'members': members,
+                            'sum_insured': premium_params['sum_insured']
+                        },
+                        k=k
+                    )
+                else:
+                    # Missing params - ask for them
+                    return Response({
+                        'agent': 'comparison',
+                        'intent': routing_decision['intent'],
+                        'query': query_text,
+                        'answer': f"I can compare premiums for {', '.join(products_to_compare)}!\n\n"
+                                  "To calculate and compare premiums, I need:\n\n"
+                                  "1. **Ages** of all members to be insured\n"
+                                  "2. **Sum insured** (coverage amount like 2L, 5L, 10L)\n"
+                                  "3. **Policy type**: Individual or Family Floater\n\n"
+                                  "Example: 'Compare premiums for 2 adults aged 35 and 40 with 5L cover'",
+                        'products_to_compare': products_to_compare,
+                        'missing_params': ['members', 'sum_insured'],
+                        'available_products': available_products
+                    }, status=status.HTTP_200_OK)
+            else:
+                # Regular document-based comparison
+                if not aspects:
+                    # Use default quick comparison
+                    result = comparison_agent.quick_compare(products_to_compare, k=k)
+                else:
+                    # Use specific aspects
+                    result = comparison_agent.compare_products(products_to_compare, aspects, k=k)
+            
+            if result.get('success'):
+                response_data = {
+                    'agent': 'comparison',
+                    'intent': routing_decision['intent'],
+                    'query': query_text,
+                    'answer': result['comparison'],
+                    'products_compared': result.get('products', products_to_compare),
+                    'aspects': result.get('aspects', aspects) if aspects else result.get('aspects'),
+                    'available_products': available_products
+                }
+                
+                # Add premium info if calculated
+                if result.get('includes_premiums'):
+                    response_data['premium_calculations'] = result.get('premium_calculations')
+                    response_data['comparison_type'] = 'with_premiums'
+                else:
+                    response_data['comparison_type'] = 'document_only'
+                
+                return Response(response_data, status=status.HTTP_200_OK)
+            else:
+                return Response({
+                    'agent': 'comparison',
+                    'intent': routing_decision['intent'],
+                    'query': query_text,
+                    'answer': f"I encountered an error while comparing: {result.get('error')}",
+                    'error': result.get('error'),
+                    'available_products': available_products
                 }, status=status.HTTP_200_OK)
         
         # Route to retrieval agent

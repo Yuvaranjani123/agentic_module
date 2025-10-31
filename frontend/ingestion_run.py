@@ -70,13 +70,17 @@ class StreamlitRAGPipeline:
         self.pdf_path = pdf_path
         self.pdf_name = self.clean_pdf_name(pdf_path)
         self.base_output_dir = base_output_dir
-        self.output_dir = os.path.join(base_output_dir, self.pdf_name)
         
-        # Use unified ChromaDB database for all documents (product-based)
+        # Use product-based organization for both output files and ChromaDB
         # Product name must be provided in session state
         product_name = st.session_state.get('product_name', '')
         if not product_name or not product_name.strip():
             raise ValueError("Product name is required. Please enter a product database name.")
+        
+        # Organize output under product name: output/ProductName/DocumentName/
+        self.output_dir = os.path.join(base_output_dir, product_name, self.pdf_name)
+        
+        # ChromaDB also under product name: output/chroma_db/ProductName/
         self.chroma_db_dir = os.path.join(base_output_dir, "chroma_db", product_name)
         
         os.makedirs(self.output_dir, exist_ok=True)
@@ -243,6 +247,11 @@ def main():
     
     pipeline = st.session_state.pipeline
     
+    # Auto-detect output directory (define early for use throughout)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)  # Go up from frontend to project root
+    base_output_dir = os.path.join(project_root, "media", "output")
+    
     # Sidebar for configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
@@ -274,65 +283,103 @@ def main():
         st.subheader("📤 Upload Mode")
         upload_mode = st.radio(
             "Choose upload mode:",
-            ["Single PDF", "Multiple PDFs (ZIP)"],
-            help="Upload one PDF or a ZIP containing multiple PDFs"
+            ["Single File (PDF/Excel)", "Multiple PDFs (ZIP)"],
+            help="Upload one file (PDF or Excel) or a ZIP containing multiple PDFs"
         )
         
         # File Upload
-        if upload_mode == "Single PDF":
+        if upload_mode == "Single File (PDF/Excel)":
             uploaded_file = st.file_uploader(
-                "Upload PDF Document",
-                type=['pdf'],
-                help="Upload the PDF document you want to process"
+                "Upload Document",
+                type=['pdf', 'xlsx', 'xls'],
+                help="Upload PDF document or Excel premium rate file"
             )
             
-            # Document Type Selection (for single file)
+            # Check file type
             if uploaded_file:
-                st.subheader("🏷️ Document Type")
-                doc_type_options = {
-                    "Policy Document": "policy",
-                    "Brochure": "brochure", 
-                    "Prospectus": "prospectus",
-                    "Terms & Conditions": "terms",
-                    "Other (Custom)": "custom"
-                }
-                selected_doc_type_label = st.selectbox(
-                    "Select Document Type",
-                    options=list(doc_type_options.keys()),
-                    help="Choose the type of document for better categorization and filtering"
-                )
+                file_extension = os.path.splitext(uploaded_file.name)[1].lower()
                 
-                # If "Other (Custom)" is selected, show text input
-                if selected_doc_type_label == "Other (Custom)":
-                    custom_doc_type = st.text_input(
-                        "Enter custom document type",
-                        placeholder="e.g., claim-form, certificate, addendum",
-                        help="Enter a custom document type (lowercase, use hyphens for spaces)"
-                    )
-                    if custom_doc_type and custom_doc_type.strip():
-                        selected_doc_type = custom_doc_type.strip().lower().replace(' ', '-')
+                # Handle Excel files (premium rates)
+                if file_extension in ['.xlsx', '.xls']:
+                    st.info("📊 **Excel file detected** - This will be uploaded as a premium rate workbook")
+                    st.caption(f"Product: **{st.session_state.product_name}**")
+                    
+                    if not st.session_state.product_name:
+                        st.error("⚠️ Please enter a Product Name first to associate this premium workbook")
+                        uploaded_file = None
                     else:
-                        selected_doc_type = "custom"
-                        if 'custom_type_warning_shown' not in st.session_state:
-                            st.warning("⚠️ Please enter a custom document type")
-                            st.session_state.custom_type_warning_shown = True
+                        # Skip document type selection for Excel
+                        selected_doc_type = "premium_excel"
+                
+                # Handle PDF files
+                elif file_extension == '.pdf':
+                    # Document Type Selection (for PDF files)
+                    st.subheader("🏷️ Document Type")
+                    doc_type_options = {
+                        "Policy Document": "policy",
+                        "Brochure": "brochure", 
+                        "Prospectus": "prospectus",
+                        "Terms & Conditions": "terms",
+                        "Other (Custom)": "custom"
+                    }
+                    selected_doc_type_label = st.selectbox(
+                        "Select Document Type",
+                        options=list(doc_type_options.keys()),
+                        help="Choose the type of document for better categorization and filtering"
+                    )
+                    
+                    # If "Other (Custom)" is selected, show text input
+                    if selected_doc_type_label == "Other (Custom)":
+                        custom_doc_type = st.text_input(
+                            "Enter custom document type",
+                            placeholder="e.g., claim-form, certificate, addendum",
+                            help="Enter a custom document type (lowercase, use hyphens for spaces)"
+                        )
+                        if custom_doc_type and custom_doc_type.strip():
+                            selected_doc_type = custom_doc_type.strip().lower().replace(' ', '-')
+                        else:
+                            selected_doc_type = "custom"
+                            if 'custom_type_warning_shown' not in st.session_state:
+                                st.warning("⚠️ Please enter a custom document type")
+                                st.session_state.custom_type_warning_shown = True
+                    else:
+                        selected_doc_type = doc_type_options[selected_doc_type_label]
+                        if 'custom_type_warning_shown' in st.session_state:
+                            del st.session_state.custom_type_warning_shown
                 else:
-                    selected_doc_type = doc_type_options[selected_doc_type_label]
-                    if 'custom_type_warning_shown' in st.session_state:
-                        del st.session_state.custom_type_warning_shown
+                    st.error(f"❌ Unsupported file type: {file_extension}")
+                    uploaded_file = None
+                    selected_doc_type = "unknown"
+            else:
+                selected_doc_type = "unknown"
         else:
             uploaded_zip = st.file_uploader(
                 "Upload ZIP File",
                 type=['zip'],
                 help="Upload a ZIP file containing multiple PDF documents"
             )
+            
+            # Detect if a new ZIP file is uploaded and reset session state
+            if uploaded_zip is not None:
+                current_zip_name = uploaded_zip.name
+                if 'last_uploaded_zip' not in st.session_state or st.session_state.last_uploaded_zip != current_zip_name:
+                    # New ZIP file detected - reset session state
+                    st.session_state.last_uploaded_zip = current_zip_name
+                    st.session_state.uploaded_files_list = []
+                    st.session_state.file_labels = {}
+                    st.session_state.labeling_complete = False
+                    
+                    # Clean up previous extraction folder (product-specific)
+                    if st.session_state.product_name:
+                        temp_extract_dir = os.path.join(base_output_dir, "temp", st.session_state.product_name, "extracted")
+                        if os.path.exists(temp_extract_dir):
+                            try:
+                                shutil.rmtree(temp_extract_dir)
+                            except Exception as e:
+                                pass  # Silently fail, will try again during extraction
+            
             uploaded_file = None  # Will handle ZIP separately
             selected_doc_type = "unknown"  # Will be set per file during labeling
-        
-        # Auto-detect output directory (hidden from user)
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(current_dir)  # Go up from frontend to project root
-        base_output_dir = os.path.join(project_root, "media", "output")
         
         # Chunking Configuration
         st.subheader("🧩 Enhanced Chunking")
@@ -369,17 +416,37 @@ def main():
     
     # Main content area
     if upload_mode == "Multiple PDFs (ZIP)" and 'uploaded_zip' in locals() and uploaded_zip is not None:
+        # Check if product name is provided
+        if not st.session_state.product_name or not st.session_state.product_name.strip():
+            st.error("❌ Please enter a Product Database Name in the sidebar before uploading ZIP file")
+            st.stop()
+        
         # Handle ZIP file upload
         st.header("📦 ZIP File Processing")
+        st.info(f"📂 Files will be extracted to: `temp/{st.session_state.product_name}/extracted/`")
         
         # Extract ZIP file
         if not st.session_state.uploaded_files_list:
             with st.spinner("Extracting ZIP file..."):
-                temp_extract_dir = os.path.join(base_output_dir, "temp", "extracted")
+                # Use product-specific temp extraction directory
+                temp_extract_dir = os.path.join(base_output_dir, "temp", st.session_state.product_name, "extracted")
+                
+                # Clean the extraction directory before extracting new ZIP
+                # This prevents old files from previous extractions appearing
+                if os.path.exists(temp_extract_dir):
+                    try:
+                        shutil.rmtree(temp_extract_dir)
+                        st.info("🧹 Cleaned previous extraction folder")
+                    except Exception as e:
+                        st.warning(f"⚠️ Could not clean previous extraction folder: {str(e)}")
+                
+                # Create fresh extraction directory
                 os.makedirs(temp_extract_dir, exist_ok=True)
                 
-                # Save ZIP temporarily
-                temp_zip_path = os.path.join(base_output_dir, "temp", uploaded_zip.name)
+                # Save ZIP temporarily in product-specific folder
+                temp_zip_dir = os.path.join(base_output_dir, "temp", st.session_state.product_name)
+                os.makedirs(temp_zip_dir, exist_ok=True)
+                temp_zip_path = os.path.join(temp_zip_dir, uploaded_zip.name)
                 with open(temp_zip_path, "wb") as f:
                     f.write(uploaded_zip.getbuffer())
                 
@@ -646,7 +713,8 @@ def main():
                                     # Upload to premium registry via API
                                     with open(file_info['full_path'], 'rb') as f:
                                         files = {'excel': (file_info['filename'], f, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
-                                        data = {'doc_name': os.path.splitext(file_info['filename'])[0]}
+                                        # Use product name as doc_name for proper association
+                                        data = {'doc_name': product_name if product_name else os.path.splitext(file_info['filename'])[0]}
                                         
                                         response = requests.post(
                                             f"{DJANGO_API}/api/upload_premium_excel/",
@@ -657,8 +725,9 @@ def main():
                                         
                                         if response.status_code == 200:
                                             result = response.json()
-                                            st.success(f"✅ {file_info['filename']} uploaded to premium registry!")
+                                            st.success(f"✅ {file_info['filename']} uploaded to premium registry as '{data['doc_name']}'!")
                                             st.write(f"**Registry Path:** `{result.get('filename', 'N/A')}`")
+                                            st.info(f"💡 This workbook will be used for premium calculations for product: **{data['doc_name']}**")
                                             successful += 1
                                         else:
                                             error_msg = response.json().get('error', 'Unknown error')
@@ -717,6 +786,16 @@ def main():
                 if successful > 0:
                     st.success(f"🎉 Batch processing completed! {successful} documents processed.")
                     st.info("💡 PDFs are now in the knowledge base. Excel files are registered for premium calculations!")
+                    
+                    # Clean up temp extraction directory after successful batch processing (product-specific)
+                    if st.session_state.product_name:
+                        temp_extract_dir = os.path.join(base_output_dir, "temp", st.session_state.product_name, "extracted")
+                        if os.path.exists(temp_extract_dir):
+                            try:
+                                shutil.rmtree(temp_extract_dir)
+                                st.caption("🧹 Cleaned up temporary extraction folder")
+                            except Exception as e:
+                                st.caption(f"⚠️ Note: Could not clean temp folder: {str(e)}")
                 
                 if failed > 0:
                     st.warning(f"⚠️ {failed} documents failed to process. Check the logs above for details.")
@@ -727,28 +806,77 @@ def main():
             st.error("❌ Please enter a Product Database Name in the sidebar before processing")
             st.stop()
         
-        # Save uploaded file temporarily
-        temp_pdf_path = os.path.join(base_output_dir, "temp", uploaded_file.name)
-        os.makedirs(os.path.dirname(temp_pdf_path), exist_ok=True)
+        # Check if this is an Excel file (premium workbook)
+        file_extension = os.path.splitext(uploaded_file.name)[1].lower()
         
-        with open(temp_pdf_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        pipeline.setup_directories(temp_pdf_path, base_output_dir)
-        
-        # Display file info
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("📄 PDF File", uploaded_file.name)
-        with col2:
-            st.metric("📁 Output Folder", pipeline.pdf_name)
-        with col3:
-            st.metric("💾 File Size", f"{uploaded_file.size / 1024:.1f} KB")
-        
-        st.divider()
-        
-        # Step 1: PDF Analysis
-        st.header("🔍 Step 1: PDF Analysis")
+        if file_extension in ['.xlsx', '.xls']:
+            # Handle Excel file upload (premium workbook)
+            st.header("📊 Premium Workbook Upload")
+            
+            st.info(f"""
+            **Uploading premium workbook for product: {st.session_state.product_name}**
+            - File: {uploaded_file.name}
+            - Size: {uploaded_file.size / 1024:.1f} KB
+            """)
+            
+            if st.button("📤 Upload Premium Excel", type="primary"):
+                with st.spinner("Uploading premium workbook..."):
+                    try:
+                        # Prepare file for upload
+                        files = {'excel': (uploaded_file.name, uploaded_file.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
+                        data = {'doc_name': st.session_state.product_name}
+                        
+                        # Upload via API
+                        response = requests.post(
+                            f"{DJANGO_API}/api/upload_premium_excel/",
+                            files=files,
+                            data=data,
+                            timeout=30
+                        )
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            st.success(f"✅ Premium workbook uploaded successfully!")
+                            st.write(f"**Product:** {st.session_state.product_name}")
+                            st.write(f"**Registry Key:** `{result.get('doc_name', 'N/A')}`")
+                            st.write(f"**File Path:** `{result.get('filename', 'N/A')}`")
+                            st.balloons()
+                            
+                            st.info("💡 This workbook will be used for premium calculations when comparing this product.")
+                        else:
+                            error_msg = response.json().get('error', 'Unknown error')
+                            st.error(f"❌ Upload failed: {error_msg}")
+                    
+                    except Exception as e:
+                        st.error(f"❌ Error uploading premium workbook: {str(e)}")
+            
+            st.divider()
+            st.caption("ℹ️ Premium workbooks are used by the comparison agent to calculate and compare premiums across products.")
+            
+        else:
+            # Handle PDF file upload
+            # Save uploaded file temporarily
+            temp_pdf_path = os.path.join(base_output_dir, "temp", uploaded_file.name)
+            os.makedirs(os.path.dirname(temp_pdf_path), exist_ok=True)
+            
+            with open(temp_pdf_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            pipeline.setup_directories(temp_pdf_path, base_output_dir)
+            
+            # Display file info
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("📄 PDF File", uploaded_file.name)
+            with col2:
+                st.metric("📁 Output Folder", pipeline.pdf_name)
+            with col3:
+                st.metric("💾 File Size", f"{uploaded_file.size / 1024:.1f} KB")
+            
+            st.divider()
+            
+            # Step 1: PDF Analysis
+            st.header("🔍 Step 1: PDF Analysis")
         
         if st.button("Analyze PDF Content", type="primary"):
             with st.spinner("Analyzing PDF content..."):

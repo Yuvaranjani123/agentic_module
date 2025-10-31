@@ -29,6 +29,21 @@ A comprehensive Retrieval-Augmented Generation (RAG) system for insurance docume
 - **Azure OpenAI**: Integration with Azure OpenAI for embeddings and chat completion
 
 ### New Enhanced Features
+- **Multi-Agent Architecture**: Intelligent query routing with specialized agents:
+  - **Retrieval Agent**: Document search and question answering
+  - **Premium Calculator Agent**: Deterministic premium calculations from Excel workbooks
+  - **Policy Comparison Agent**: Multi-product comparison with premium integration
+- **Premium Calculation**: Upload Excel premium charts and calculate premiums deterministically
+  - Supports both **exact age-wise** and **age band-wise** premium rates
+  - Mixed format support: Different sheets can use different age formats in same workbook
+  - Individual and family floater policies
+  - Automatic format detection and intelligent age matching
+  - See [PREMIUM_CALCULATOR_AGE_FORMATS.md](./PREMIUM_CALCULATOR_AGE_FORMATS.md) for details
+- **Policy Comparison**: Compare multiple insurance products side-by-side
+  - Automatic premium calculation integration
+  - Document-based feature comparison
+  - Value analysis and recommendations
+- **Product-Based Architecture**: Unified database per product for better cross-document search
 - **Document Type Classification**: Categorize documents as Policy, Brochure, Prospectus, or Terms & Conditions during ingestion
 - **Advanced Document Filtering**: Filter search results by document type for more relevant answers
 - **Real-Time Evaluation Metrics**: Comprehensive retrieval quality assessment including:

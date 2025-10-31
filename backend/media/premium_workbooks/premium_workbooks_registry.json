@@ -2,6 +2,21 @@
   "activ_assure_premium_chart": {
     "excel_path": "C:\\repo\\certification\\project_2\\rag_module\\backend\\media\\premium_workbooks\\activ_assure_premium_chart_premium_rates.xlsx",
     "filename": "activ_assure_premium_chart_premium_rates.xlsx",
-    "uploaded_at": "1761831022.3599865"
+    "uploaded_at": "1761886999.7031343"
+  },
+  "activ_fit_premium_chart": {
+    "excel_path": "C:\\repo\\certification\\project_2\\rag_module\\backend\\media\\premium_workbooks\\activ_fit_premium_chart_premium_rates.xlsx",
+    "filename": "activ_fit_premium_chart_premium_rates.xlsx",
+    "uploaded_at": "1761898358.2205234"
+  },
+  "ActivFit": {
+    "excel_path": "C:\\repo\\certification\\project_2\\rag_module\\backend\\media\\premium_workbooks\\ActivFit_premium_rates.xlsx",
+    "filename": "ActivFit_premium_rates.xlsx",
+    "uploaded_at": "1761907016.7080321"
+  },
+  "ActivAssure": {
+    "excel_path": "C:\\repo\\certification\\project_2\\rag_module\\backend\\media\\premium_workbooks\\ActivAssure_premium_rates.xlsx",
+    "filename": "ActivAssure_premium_rates.xlsx",
+    "uploaded_at": "1761907608.9855497"
   }
 }
