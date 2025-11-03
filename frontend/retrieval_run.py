@@ -1,551 +1,129 @@
+"""
+Insurance Document Retrieval - Clean Professional Interface
+
+A minimalist, professional UI for document retrieval with conversation support.
+"""
 import os
 import streamlit as st
 import requests
 from dotenv import load_dotenv
+from components.retrieval import (
+    QueryInterface,
+    ResultsDisplay,
+    SettingsPanel,
+    ConversationPanel
+)
 
 load_dotenv()
 
-# Django API base URL
+# Configuration
 DJANGO_API = os.getenv("API_BASE")
 
-st.set_page_config(page_title="Insurance RAG - Agent Retrieval", page_icon="🤖")
-
-st.title("🤖 Insurance Document Retrieval (Agent)")
-st.caption("Powered by Retrieval Agent - Using existing retrieval logic wrapped in an agent pattern")
+# Page configuration
+st.set_page_config(
+    page_title="Insurance RAG - Retrieval",
+    page_icon="🔍",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # Initialize session state
-if 'selected_query' not in st.session_state:
-    st.session_state.selected_query = ""
 if 'conversation_id' not in st.session_state:
     import uuid
     st.session_state.conversation_id = str(uuid.uuid4())
+
 if 'conversation_history' not in st.session_state:
     st.session_state.conversation_history = []
-if 'compare_products' not in st.session_state:
-    st.session_state.compare_products = []
 
-# Configuration sidebar
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    
+# Initialize components
+query_interface = QueryInterface()
+results_display = ResultsDisplay()
+settings_panel = SettingsPanel()
+conversation_panel = ConversationPanel()
 
-    # Auto-detect available product databases
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(current_dir)  # Go up from frontend to project root
-    base_output_dir = os.path.join(project_root, "media", "output")
-    chroma_base_dir = os.path.join(base_output_dir, "chroma_db")
-    
-    # Detect all available product databases
-    available_products = []
-    if os.path.exists(chroma_base_dir):
-        for item in os.listdir(chroma_base_dir):
-            item_path = os.path.join(chroma_base_dir, item)
-            if os.path.isdir(item_path) and os.path.exists(os.path.join(item_path, "chroma.sqlite3")):
-                available_products.append(item)
-    
-    if available_products:
-        # Initialize product selection in session state
-        if 'selected_product' not in st.session_state:
-            st.session_state.selected_product = available_products[0]
-        
-        # Show product selector if multiple products exist
-        if len(available_products) > 1:
-            st.subheader("🏷️ Product Database")
-            selected_product = st.selectbox(
-                "Select Product:",
-                available_products,
-                index=available_products.index(st.session_state.selected_product) if st.session_state.selected_product in available_products else 0,
-                help="Choose which product database to search"
-            )
-            st.session_state.selected_product = selected_product
-            chroma_db_dir = os.path.join(chroma_base_dir, selected_product)
-            st.caption(f"💾 Database: `chroma_db/{selected_product}/`")
-        else:
-            # Single product - auto-select
-            st.session_state.selected_product = available_products[0]
-            chroma_db_dir = os.path.join(chroma_base_dir, available_products[0])
-            st.success(f"✅ **Product Database**: {available_products[0]}")
-            st.caption("📚 Searching across all documents in this product")
-        
-        # Show technical details in expander
-        with st.expander("🔧 Database Info", expanded=False):
-            st.write(f"**Product**: `{st.session_state.selected_product}`")
-            st.write(f"**Database Path**: `{chroma_db_dir}`")
-            st.write(f"**Collection Name**: `insurance_chunks`")
-            st.write(f"**Architecture**: Unified database with all documents")
-            st.caption("💡 All documents are indexed together with metadata-based filtering")
-        
-        # Policy Comparison Section (only if multiple products)
-        if len(available_products) > 1:
-            st.divider()
-            st.subheader("🔄 Policy Comparison")
-            st.caption("Compare multiple insurance products")
-            
-            # Multi-select for products to compare
-            compare_products = st.multiselect(
-                "Select products to compare:",
-                options=available_products,
-                default=available_products[:2] if len(available_products) >= 2 else available_products,
-                help="Choose 2 or more products to compare"
-            )
-            
-            # Store in session state for query construction
-            st.session_state.compare_products = compare_products
-            
-            if len(compare_products) >= 2:
-                st.success(f"✅ Ready to compare {len(compare_products)} products")
-                st.caption(f"Products: {', '.join(compare_products)}")
-            elif len(compare_products) == 1:
-                st.info("ℹ️ Select at least 2 products for comparison")
-            
-            with st.expander("💡 Comparison Tips", expanded=False):
-                st.markdown("""
-                **How to ask comparison questions:**
-                - "Compare these policies on coverage and premium"
-                - "What are the differences in maternity benefits?"
-                - "Which policy has better claim process?"
-                - "Compare exclusions across all products"
-                
-                The system will automatically compare the selected products.
-                """)
-    else:
-        st.error("❌ No product databases found")
-        st.info("Please ingest documents first using the Ingestion interface")
-        chroma_db_dir = st.text_input(
-            "ChromaDB Directory (Manual)",
-            value="",
-            help="Manually enter the path to your ChromaDB directory"
-        )
-        st.session_state.compare_products = []
-    
-    k_results = st.slider("Number of results", min_value=1, max_value=20, value=5)
-    
-    # Advanced options - collapsed by default
-    with st.expander("⚙️ Advanced Options", expanded=False):
-        st.caption("Optional: Filter documents by type (leave as 'Search All' for normal use)")
-        
-        filter_mode = st.radio(
-            "Filter Mode:",
-            ["Search All", "Include Specific Types", "Exclude Specific Types"],
-            help="Default: Search all documents. Use filters for testing/debugging only."
-        )
-        
-        # Get all available document types
-        common_doc_types = ["policy", "brochure", "prospectus", "terms", "premium-calculation", 
-                           "claim-form", "certificate", "addendum", "rider-document"]
-        
-        doc_type_filter = None
-        exclude_doc_types = []
-        
-        if filter_mode == "Include Specific Types":
-            selected_types = st.multiselect(
-                "Include document types:",
-                options=common_doc_types,
-                default=None,
-                help="Only search in selected document types"
-            )
-            if selected_types:
-                doc_type_filter = selected_types
-                st.info(f"✅ Including: {', '.join(doc_type_filter)}")
-        
-        elif filter_mode == "Exclude Specific Types":
-            excluded_types = st.multiselect(
-                "Exclude document types:",
-                options=common_doc_types,
-                default=None,
-                help="Exclude these document types from search"
-            )
-            if excluded_types:
-                exclude_doc_types = excluded_types
-                st.warning(f"🚫 Excluding: {', '.join(exclude_doc_types)}")
-    
-    # Evaluation options
-    st.subheader("📊 Evaluation")
-    enable_evaluation = st.checkbox(
-        "Enable Retrieval Evaluation",
-        value=True,  # Changed to True by default
-        help="Get detailed metrics about retrieval quality (may slow down responses)"
-    )
-    
-    # Conversation memory controls
-    st.subheader("💬 Conversation Memory")
-    st.caption(f"Session ID: {st.session_state.conversation_id[:8]}...")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔄 New Conversation"):
-            import uuid
-            st.session_state.conversation_id = str(uuid.uuid4())
-            st.session_state.conversation_history = []
-            # Clear server-side history
-            try:
-                requests.post(
-                    f"{DJANGO_API}/agents/clear-conversation/",
-                    json={
-                        "chroma_db_dir": chroma_db_dir if chroma_db_dir else "",
-                        "conversation_id": st.session_state.conversation_id
-                    },
-                    timeout=5
-                )
-            except:
-                pass
-            st.success("Started new conversation!")
-            st.rerun()
-    
-    with col2:
-        if len(st.session_state.conversation_history) > 0:
-            st.metric("History", f"{len(st.session_state.conversation_history)} exchanges")
-    
-    # if st.button("📈 View Evaluation Summary"):
-    #     try:
-    #         eval_resp = requests.get(f"{DJANGO_API}/retriever/evaluation-summary/", timeout=10)
-    #         if eval_resp.status_code == 200:
-    #             eval_data = eval_resp.json()
-    #             st.success("✅ Evaluation data loaded")
-                
-    #             # Display evaluation metrics in sidebar
-    #             if "total_evaluations" in eval_data:
-    #                 st.metric("Total Evaluations", eval_data["total_evaluations"])
-    #             if "avg_term_coverage" in eval_data:
-    #                 st.metric("Avg Term Coverage", f"{eval_data['avg_term_coverage']:.1%}")
-    #             if "avg_diversity" in eval_data:
-    #                 st.metric("Avg Diversity", f"{eval_data['avg_diversity']:.3f}")
-    #         else:
-    #             st.warning("⚠️ No evaluation data available yet")
-    #     except Exception as e:
-    #         st.error(f"❌ Error loading evaluation: {str(e)}")
-    
-    # Django API Status
-    st.subheader("🔗 Django Agent API Status")
-    try:
-        resp = requests.get(f"{DJANGO_API}/agents/query/", timeout=5)
-        if resp.status_code in [200, 405]:  # 405 means endpoint exists but wrong method
-            st.success("✅ Agent API accessible")
-        else:
-            st.error(f"❌ Agent API error: {resp.status_code}")
-    except Exception as e:
-        st.error(f"❌ Agent API not accessible: {str(e)}")
+# Render settings sidebar
+config = settings_panel.render_sidebar()
 
-# Main query interface
+# Main content area
+st.title("🔍 Document Retrieval")
+st.caption("Ask questions about insurance documents with AI-powered search")
+
+# Query interface
 st.divider()
-
-# Show comparison hint if multiple products selected
-if st.session_state.compare_products and len(st.session_state.compare_products) >= 2:
-    st.info(f"🔄 **Comparison Mode Active** - Comparing: {', '.join(st.session_state.compare_products)}")
-    st.caption("Ask comparison questions like: 'What are the differences in coverage?' or 'Which has better maternity benefits?'")
-
-query = st.text_input(
-    "Ask a question about the insurance document:",
-    value=st.session_state.selected_query,
-    placeholder="e.g., What vaccinations are covered for children? OR Compare these policies on premium and coverage"
+query, is_submitted = query_interface.render_with_button(
+    placeholder_text="Ask about coverage, benefits, exclusions, claims..."
 )
 
-if st.button("🔍 Search", type="primary") and query:
-    if not chroma_db_dir:
-        st.error("Please provide a ChromaDB directory path")
+# Process query
+if is_submitted and query:
+    if not config.get('chroma_db_dir'):
+        results_display.render_error(
+            "No product database found. Please run ingestion first."
+        )
     else:
-        with st.spinner("Retrieving answer..."):
+        with st.spinner("Searching documents..."):
             try:
-                # Call enhanced Django API
-                api_payload = {
+                # Build API payload
+                payload = {
                     "query": query,
-                    "chroma_db_dir": chroma_db_dir,
-                    "k": k_results,
-                    "evaluate": enable_evaluation,
-                    "conversation_id": st.session_state.conversation_id  # Add conversation ID
+                    "chroma_db_dir": config['chroma_db_dir'],
+                    "k": config['k_results'],
+                    "evaluate_retrieval": config['enable_evaluation'],
+                    "conversation_id": st.session_state.conversation_id
                 }
                 
-                # Add comparison products if any selected
-                if st.session_state.compare_products and len(st.session_state.compare_products) >= 2:
-                    api_payload["compare_products"] = st.session_state.compare_products
+                # Add filters if set
+                if config.get('doc_type_filter'):
+                    payload['doc_type_filter'] = config['doc_type_filter']
+                if config.get('exclude_doc_types'):
+                    payload['exclude_doc_types'] = config['exclude_doc_types']
                 
-                # Add document type filters
-                if doc_type_filter:
-                    api_payload["doc_type"] = doc_type_filter  # List of types to include
-                if exclude_doc_types:
-                    api_payload["exclude_doc_types"] = exclude_doc_types  # List of types to exclude
-                    
-                # Call agent endpoint instead of retriever
+                # Call API
                 response = requests.post(
                     f"{DJANGO_API}/agents/query/",
-                    json=api_payload,
-                    timeout=60 if enable_evaluation else 30  # Longer timeout for evaluation
+                    json=payload,
+                    timeout=30
                 )
                 
                 if response.status_code == 200:
-                    result = response.json()
+                    data = response.json()
                     
-                    # Detect which agent handled the query
-                    agent_type = result.get('agent', 'retrieval')
-                    intent = result.get('intent', 'unknown')
+                    # Display answer
+                    results_display.render_answer(
+                        data['answer'],
+                        data.get('evaluation')
+                    )
                     
-                    # Add to conversation history
-                    answer_text = result.get("answer", "")
+                    # Display sources
+                    results_display.render_sources(data.get('sources', []))
+                    
+                    # Update conversation history
                     st.session_state.conversation_history.append({
-                        "query": query,
-                        "answer": answer_text,
-                        "agent": agent_type
+                        'question': query,
+                        'answer': data['answer']
                     })
-                    
-                    # Display agent badge
-                    if agent_type == 'premium_calculator':
-                        st.info(f"🤖 **Agent:** Premium Calculator • **Intent:** {intent}")
-                    elif agent_type == 'comparison':
-                        st.info(f"🤖 **Agent:** Policy Comparison • **Intent:** {intent}")
-                    else:
-                        st.info(f"🤖 **Agent:** Document Retrieval • **Intent:** {intent}")
-                    
-                    # Handle Policy Comparison Results
-                    if agent_type == 'comparison':
-                        st.subheader("🔄 Policy Comparison Result")
-                        
-                        products_compared = result.get('products_compared', [])
-                        comparison_type = result.get('comparison_type', 'document_only')
-                        
-                        if products_compared:
-                            st.success(f"**Compared Products:** {', '.join(products_compared)}")
-                        
-                        # Show comparison type badge
-                        if comparison_type == 'with_premiums':
-                            st.info("✨ **Enhanced with Premium Calculations**")
-                        else:
-                            aspects = result.get('aspects')
-                            if aspects:
-                                st.caption(f"**Comparison Aspects:** {', '.join(aspects)}")
-                        
-                        # If premium calculations included, show them separately
-                        if comparison_type == 'with_premiums' and 'premium_calculations' in result:
-                            st.subheader("💰 Premium Comparison")
-                            
-                            premium_calcs = result.get('premium_calculations', {})
-                            
-                            # Create columns for each product
-                            cols = st.columns(len(premium_calcs))
-                            
-                            for idx, (product, calc_data) in enumerate(premium_calcs.items()):
-                                with cols[idx]:
-                                    st.markdown(f"**{product}**")
-                                    if calc_data.get('error'):
-                                        st.error(f"⚠️ {calc_data['error']}")
-                                    else:
-                                        total = calc_data.get('total_premium', 0)
-                                        base = calc_data.get('base_premium', 0)
-                                        gst = calc_data.get('gst_amount', 0)
-                                        
-                                        st.metric("Total Premium", f"₹{total:,.0f}")
-                                        st.caption(f"Base: ₹{base:,.0f}")
-                                        st.caption(f"GST: ₹{gst:,.0f}")
-                            
-                            st.divider()
-                        
-                        # Display comparison answer
-                        st.markdown(answer_text)
-                        
-                        # Handle missing parameters case
-                        if 'missing_params' in result:
-                            st.warning("⚠️ **Additional Information Needed**")
-                            st.info("Please provide the missing details in your next query to get premium calculations.")
-                        
-                        # Show available products info
-                        with st.expander("ℹ️ Available Products", expanded=False):
-                            available = result.get('available_products', [])
-                            st.write(f"**All Available Products:** {', '.join(available)}")
-                            st.caption("You can compare any of these products using the sidebar selector")
-                    
-                    # Handle Premium Calculator Results
-                    elif agent_type == 'premium_calculator':
-                        st.subheader("💰 Premium Calculation Result")
-                        
-                        # Check if we have full calculation or need more info
-                        if 'total_premium' in result:
-                            # Display premium breakdown
-                            st.success(f"### Total Premium: ₹{result['total_premium']:,.0f}")
-                            
-                            # Create metrics columns
-                            col1, col2, col3 = st.columns(3)
-                            
-                            with col1:
-                                st.metric("Policy Type", result.get('policy_type', 'N/A').replace('_', ' ').title())
-                            with col2:
-                                st.metric("Gross Premium", f"₹{result.get('gross_premium', 0):,.0f}")
-                            with col3:
-                                gst_rate = result.get('gst_rate', 0.18)
-                                gst_amount = result.get('gst_amount', 0)
-                                st.metric(f"GST ({gst_rate*100:.0f}%)", f"₹{gst_amount:,.0f}")
-                            
-                            # Display composition and sum insured
-                            if result.get('composition'):
-                                st.write(f"**Composition:** {result['composition']}")
-                            st.write(f"**Sum Insured:** ₹{result.get('sum_insured', 0):,.0f}")
-                            
-                            # Display detailed breakdown
-                            if result.get('breakdown'):
-                                with st.expander("📋 Premium Breakdown Details", expanded=True):
-                                    breakdown_data = result['breakdown']
-                                    
-                                    # Create table
-                                    import pandas as pd
-                                    df = pd.DataFrame(breakdown_data)
-                                    
-                                    # Format premium column
-                                    if 'premium' in df.columns:
-                                        df['premium'] = df['premium'].apply(lambda x: f"₹{x:,.0f}")
-                                    
-                                    st.dataframe(df, use_container_width=True, hide_index=True)
-                            
-                            # Show calculation source
-                            if result.get('sheet_used'):
-                                st.caption(f"📊 Sheet Used: `{result['sheet_used']}`")
-                            if result.get('age_band'):
-                                st.caption(f"� Age Band: `{result['age_band']}`")
-                        
-                        else:
-                            # Missing parameters - show clarifying message
-                            st.warning("### Need More Information")
-                            st.write(answer_text)
-                            
-                            if result.get('extracted_params'):
-                                with st.expander("🔍 Extracted Parameters"):
-                                    st.json(result['extracted_params'])
-                    
-                    # Handle Document Retrieval Results
-                    else:
-                        st.subheader("📌 Answer")
-                        st.write(answer_text)
-                        
-                        st.subheader("📑 Sources")
-                        
-                        # Display sources for document retrieval
-                        if result.get("sources"):
-                            for i, source in enumerate(result["sources"], 1):
-                                # Enhanced source header with document type badge
-                                source_type = source.get('type', 'Unknown')
-                                doc_type_display = source.get('metadata', {}).get('doc_type', 'unknown')
-                                
-                                # Format doc type as prominent badge
-                                doc_type_badge = doc_type_display.upper()
-                                source_header = f"Source {i} - {source_type.title()} • 📄 {doc_type_badge}"
-                                    
-                                with st.expander(source_header):
-                                    # Source metadata
-                                    col1, col2 = st.columns(2)
-                                    
-                                    with col1:
-                                        if source.get('page'):
-                                            st.write(f"**Page:** {source['page']}")
-                                        if source.get('table'):
-                                            st.write(f"**Table:** {source['table']}")
-                                        if source.get('row_index') is not None:
-                                            st.write(f"**Row:** {source['row_index']}")
-                                    
-                                    with col2:
-                                        st.write(f"**Type:** {source.get('type', 'Unknown')}")
-                                        if source.get('chunking_method'):
-                                            st.write(f"**Chunking:** {source['chunking_method'].upper()}")
-                                        if source.get('chunk_idx') is not None:
-                                            st.write(f"**Chunk ID:** {source['chunk_idx']}")
-                                    
-                                    # Content
-                                    st.write("**Content:**")
-                                    content = source.get('content', '')
-                                    if len(content) > 500:
-                                        st.write(content[:500] + "...")
-                                        # Show full content in a text area instead of nested expander
-                                        if st.button(f"Show full content {i}", key=f"show_full_{i}"):
-                                            st.text_area("Full Content", content, height=200, key=f"full_content_{i}")
-                                    else:
-                                        st.write(content)
-                        else:
-                            st.info("No sources found")
-                        
-                        # Display evaluation metrics if available (only for document retrieval)
-                        if enable_evaluation and result.get("evaluation"):
-                            st.subheader("📊 Retrieval Evaluation")
-                            eval_data = result["evaluation"]
-                            
-                            if not eval_data.get("error"):
-                                # Create metrics columns
-                                eval_col1, eval_col2, eval_col3 = st.columns(3)
-                                
-                                with eval_col1:
-                                    if "term_coverage" in eval_data:
-                                        st.metric("Term Coverage", f"{eval_data['term_coverage']:.1%}")
-                                    if "avg_semantic_similarity" in eval_data:
-                                        st.metric("Avg Similarity", f"{eval_data['avg_semantic_similarity']:.3f}")
-                                
-                                with eval_col2:
-                                    if "query_coverage" in eval_data:
-                                        st.metric("Query Coverage", f"{eval_data['query_coverage']:.1%}")
-                                    if "diversity" in eval_data:
-                                        st.metric("Diversity", f"{eval_data['diversity']:.3f}")
-                                
-                                with eval_col3:
-                                    if "covered_terms" in eval_data:
-                                        st.metric("Covered Terms", f"{len(eval_data['covered_terms'])}/{eval_data.get('total_terms', 0)}")
-                                
-                                # Show covered terms if available
-                                if eval_data.get("covered_terms"):
-                                    with st.expander("🔍 Query Term Analysis"):
-                                        st.write("**Covered Terms:**", ", ".join(eval_data["covered_terms"]))
-                                        
-                                # Show semantic similarities if available
-                                if eval_data.get("semantic_similarities"):
-                                    with st.expander("🧠 Semantic Similarity Scores"):
-                                        similarities = eval_data["semantic_similarities"]
-                                        for i, sim in enumerate(similarities, 1):
-                                            st.write(f"Source {i}: {sim:.3f}")
-                            else:
-                                st.error(f"Evaluation Error: {eval_data['error']}")
-                        
+                
                 else:
-                    error_msg = response.json().get("error", "Unknown error") if response.headers.get('content-type') == 'application/json' else response.text
-                    st.error(f"API Error ({response.status_code}): {error_msg}")
-                    
-            except requests.exceptions.RequestException as e:
-                st.error(f"Connection Error: {str(e)}")
-                st.info("Make sure the Django server is running on the configured URL")
+                    results_display.render_error(
+                        f"API error: {response.status_code}"
+                    )
+            
+            except requests.Timeout:
+                results_display.render_error(
+                    "Request timed out. Please try again."
+                )
             except Exception as e:
-                st.error(f"Error: {str(e)}")
+                results_display.render_error(f"Error: {str(e)}")
 
-# Sample queries section
+# Conversation history (in expandable section)
+if st.session_state.conversation_history:
+    st.divider()
+    with st.expander("💬 Conversation History", expanded=False):
+        conversation_panel.render(st.session_state.conversation_history)
+
+# Footer
 st.divider()
-
-# Show conversation history if exists
-if len(st.session_state.conversation_history) > 0:
-    with st.expander(f"💬 Conversation History ({len(st.session_state.conversation_history)} exchanges)", expanded=False):
-        for i, exchange in enumerate(reversed(st.session_state.conversation_history[:-1]), 1):  # Exclude current
-            agent_icon = "💰" if exchange.get('agent') == 'premium_calculator' else "📄"
-            st.markdown(f"{agent_icon} **Q{len(st.session_state.conversation_history) - i}:** {exchange['query']}")
-            st.markdown(f"**A{len(st.session_state.conversation_history) - i}:** {exchange['answer'][:200]}...")
-            st.divider()
-
-st.subheader("💡 Sample Queries")
-
-# Organize queries by category
-col1, col2 = st.columns(2)
-
-with col1:
-    st.markdown("**📄 Document Questions**")
-    doc_queries = [
-        "What vaccinations are covered for children?",
-        "What is the claim process for hospitalization?", 
-        "What are the annual check-up benefits?",
-        "What are the exclusions in the policy?"
-    ]
-    for i, sample in enumerate(doc_queries):
-        if st.button(f"📝 {sample}", key=f"doc_sample_{i}", use_container_width=True):
-            st.session_state.selected_query = sample
-            st.rerun()
-
-with col2:
-    st.markdown("**💰 Premium Calculations**")
-    premium_queries = [
-        "Calculate premium for 35 year old with 5L cover",
-        "Premium for 2 adults aged 30, 35 with 10L cover",
-        "How much for family floater 2 adults + 1 child, ages 40, 38, 7 with 10L",
-        "What is the cost for individual aged 50 with 20L coverage"
-    ]
-    for i, sample in enumerate(premium_queries):
-        if st.button(f"� {sample}", key=f"premium_sample_{i}", use_container_width=True):
-            st.session_state.selected_query = sample
-            st.rerun()
+st.caption(
+    "💡 Tip: Use the sidebar to adjust settings, switch products, "
+    "or start a new conversation"
+)

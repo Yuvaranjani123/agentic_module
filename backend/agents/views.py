@@ -10,7 +10,7 @@ from logs.utils import setup_logging
 from .retrieval_agent import RetrievalAgent
 from .comparison_agent import PolicyComparisonAgent
 from .orchestrator import AgentOrchestrator
-from .premium_calculator import PremiumCalculator
+from .calculators import PremiumCalculator
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -147,6 +147,35 @@ def agent_query(request):
                     members=members,
                     sum_insured=params['sum_insured']
                 )
+                
+                # Format answer for frontend
+                if result.get('error'):
+                    answer = f"❌ Error calculating premium: {result['error']}"
+                else:
+                    # Build human-readable answer
+                    if policy_type == 'family_floater':
+                        answer = f"**Premium Calculation Result**\n\n"
+                        answer += f"**Policy Type:** Family Floater\n"
+                        answer += f"**Composition:** {result.get('composition', 'N/A')}\n"
+                        answer += f"**Sum Insured:** ₹{result['sum_insured']:,}\n"
+                        answer += f"**Eldest Age:** {result.get('eldest_age')} ({result.get('age_band', 'N/A')})\n\n"
+                        answer += f"**Gross Premium:** ₹{result['gross_premium']:,.2f}\n"
+                        answer += f"**GST ({result['gst_rate']*100:.0f}%):** ₹{result['gst_amount']:,.2f}\n"
+                        answer += f"**Total Premium:** ₹{result['total_premium']:,.2f}"
+                    else:
+                        answer = f"**Premium Calculation Result**\n\n"
+                        answer += f"**Policy Type:** Individual\n"
+                        answer += f"**Sum Insured:** ₹{result['sum_insured']:,}\n\n"
+                        for i, member_premium in enumerate(result['breakdown'], 1):
+                            if member_premium.get('error'):
+                                answer += f"Member {i}: Error - {member_premium['error']}\n"
+                            else:
+                                answer += f"Member {i}: Age {member_premium['age']} ({member_premium.get('age_band', 'N/A')}) - ₹{member_premium['premium']:,.2f}\n"
+                        answer += f"\n**Gross Premium:** ₹{result['gross_premium']:,.2f}\n"
+                        answer += f"**GST ({result['gst_rate']*100:.0f}%):** ₹{result['gst_amount']:,.2f}\n"
+                        answer += f"**Total Premium:** ₹{result['total_premium']:,.2f}"
+                
+                result['answer'] = answer
                 result['agent'] = 'premium_calculator'
                 result['intent'] = routing_decision['intent']
                 result['query'] = query_text
