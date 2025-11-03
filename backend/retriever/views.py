@@ -24,9 +24,34 @@ evaluator = RetrievalEvaluator()
 # ---------------------------
 # Direct ChromaDB + LLM Query
 # ---------------------------
-def query_document_internal(collection, embedding_model, query, k=5, doc_type_filter=None, 
-                          evaluate_retrieval=False):
-    """Enhanced query function with document domain filtering and evaluation."""
+def query_document_internal(
+    collection: Any, 
+    embedding_model: AzureOpenAIEmbeddings, 
+    query: str, 
+    k: int = 5, 
+    doc_type_filter: str = None, 
+    evaluate_retrieval: bool = False
+) -> Dict[str, Any]:
+    """
+    Enhanced query function with document domain filtering and evaluation.
+    
+    Performs semantic search on ChromaDB collection using Azure OpenAI embeddings,
+    optionally filters by document type, and evaluates retrieval quality.
+    
+    Args:
+        collection: ChromaDB collection instance to query.
+        embedding_model: Azure OpenAI embeddings model for query vectorization.
+        query: User's natural language question or search query.
+        k: Number of top results to retrieve (default: 5).
+        doc_type_filter: Optional document type filter ('policy', 'brochure', 'prospectus', 'terms').
+        evaluate_retrieval: If True, evaluates retrieval quality using RetrievalEvaluator.
+        
+    Returns:
+        dict: Dictionary containing:
+            - answer (str): Generated answer from LLM or error message
+            - sources (List[Dict]): Retrieved document chunks with metadata
+            - evaluation (Dict): Retrieval evaluation metrics if evaluate_retrieval=True
+    """
     logger.info(f"Querying ChromaDB for: '{query}' with top {k} results, doc_type_filter: {doc_type_filter}")
     
     # Get query embedding

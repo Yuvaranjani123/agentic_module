@@ -16,7 +16,26 @@ logger = logging.getLogger(__name__)
 #     cosine_similarity = None
 
 # --- TABLE EXTRACTION SCRIPT ---
-def extract_and_save_tables(pdf_path, output_dir):
+def extract_and_save_tables(pdf_path: str, output_dir: str) -> None:
+    """
+    Extract tables from a PDF file and save them as CSV files with intelligent merging.
+    
+    This function extracts all tables from a PDF, merges tables that are split across
+    consecutive pages, and saves them as CSV files. It also generates a mapping file
+    for manual editing if needed.
+    
+    Args:
+        pdf_path: Absolute path to the input PDF file.
+        output_dir: Directory path where extracted table CSV files will be saved.
+        
+    Returns:
+        None. Tables are saved as CSV files in the output directory.
+        
+    Side Effects:
+        - Creates output_dir if it doesn't exist
+        - Writes CSV files for each merged table
+        - Creates table_file_map.csv for reference mapping
+    """
     import os
     os.makedirs(output_dir, exist_ok=True)
     import pdfplumber
@@ -101,7 +120,20 @@ def extract_and_save_tables(pdf_path, output_dir):
 
 
 
-def load_table_file_map(csv_path):
+def load_table_file_map(csv_path: str) -> dict:
+    """
+    Load the table-to-file mapping from a CSV file.
+    
+    Reads the table_file_map.csv file and creates a mapping dictionary
+    from (page_num, table_idx) tuples to table filenames.
+    
+    Args:
+        csv_path: Absolute path to the table_file_map.csv file.
+        
+    Returns:
+        dict: Dictionary mapping (page_num, table_idx) tuples to table filenames.
+              Example: {(1, 1): 'table_merged_pages_1_1.csv'}
+    """
     table_file_map = {}
     with open(csv_path, newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
@@ -115,7 +147,27 @@ def load_table_file_map(csv_path):
                 continue
     return table_file_map
 
-def extract_text(pdf_path, output_dir):
+def extract_text(pdf_path: str, output_dir: str) -> None:
+    """
+    Extract text from PDF pages excluding table regions and save with table references.
+    
+    This function extracts text from each PDF page while excluding content that falls
+    within table bounding boxes. It maintains the original text layout and inserts
+    references to extracted tables at appropriate locations.
+    
+    Args:
+        pdf_path: Absolute path to the input PDF file.
+        output_dir: Directory path where text files will be saved and where
+                   table_file_map.csv is expected to be located.
+                   
+    Returns:
+        None. Text files are saved as page_N_text.txt in the output directory.
+        
+    Side Effects:
+        - Creates output_dir if it doesn't exist
+        - Writes one text file per PDF page
+        - Inserts table references based on table_file_map.csv if available
+    """
     os.makedirs(output_dir, exist_ok=True)
     table_map_csv = os.path.join(output_dir, "table_file_map.csv")
     if os.path.exists(table_map_csv):
