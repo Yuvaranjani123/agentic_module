@@ -192,8 +192,8 @@ Metadata: 3 iterations, 2 tools used, 8.7s execution time
 
 ```bash
 # 1. Clone and setup
-git clone https://github.com/Yuvaranjani123/rag_module_1.git
-cd rag_module_1
+git clone https://github.com/Yuvaranjani123/agentic_module.git
+cd agentic_module
 python -m venv venv
 venv\Scripts\Activate.ps1  # Windows PowerShell
 # source venv/bin/activate  # macOS/Linux
@@ -298,7 +298,7 @@ POST /agents/query/
 
 
 ```
-rag_module/
+agentic_module/
 ├── backend/                          # Django REST API Backend
 │   ├── agents/                       # 🤖 Multi-Agent System
 │   │   ├── retrieval_agent.py       # Document Q&A agent with memory
