@@ -183,7 +183,10 @@ class LearningIntentClassifier:
                 json_start = response.index('{')
                 json_end = response.rindex('}') + 1
                 json_str = response[json_start:json_end]
-                return json.loads(json_str)
+                classification = json.loads(json_str)
+                # Add learning_active flag
+                classification['learning_active'] = True
+                return classification
             else:
                 raise ValueError("No JSON in response")
                 
@@ -272,7 +275,8 @@ class LearningIntentClassifier:
             'intent': intent,
             'confidence': confidence,
             'reasoning': 'Fallback heuristic classification',
-            'alternative_intents': []
+            'alternative_intents': [],
+            'learning_active': True
         }
     
     def _log_interaction(self, query: str, classification: Dict[str, Any], 

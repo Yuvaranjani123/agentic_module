@@ -59,7 +59,8 @@ def get_agentic_system():
             
             # Initialize retriever with default product (ActivAssure)
             # Note: This can be overridden per request if needed
-            default_chroma_path = "media/output/chroma_db/ActivAssure"
+            from django.conf import settings
+            default_chroma_path = os.path.join(settings.MEDIA_ROOT, "output", "chroma_db", "ActivAssure")
             retriever = DocumentRetriever(
                 chroma_db_dir=default_chroma_path,
                 embeddings=embeddings
@@ -173,6 +174,26 @@ def agentic_stats(request):
         
     except Exception as e:
         logger.error(f"Error fetching stats: {e}", exc_info=True)
+        return Response(
+            {'success': False, 'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+def agentic_reset_stats(request):
+    """Reset agentic system statistics."""
+    try:
+        system = get_agentic_system()
+        result = system.reset_stats()
+        
+        return Response({
+            'success': True,
+            'message': result['message']
+        })
+        
+    except Exception as e:
+        logger.error(f"Error resetting stats: {e}", exc_info=True)
         return Response(
             {'success': False, 'error': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR

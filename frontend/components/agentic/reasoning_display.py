@@ -121,26 +121,137 @@ class ReasoningDisplay:
     
     def render_complete_response(self, response: dict):
         """
-        Render complete agentic response.
+        Render complete agentic response with final answer first, reasoning trace separate.
         
         Args:
             response: Complete response dictionary from API
         """
+        # ===== PRIMARY SECTION: Final Answer (Always Visible) =====
+        st.markdown("### ✅ Final Answer")
+        
+        final_answer = response.get('final_answer', 'No answer provided')
+        st.success(final_answer)
+        
+        # Quick metadata summary
+        metadata = response.get('agentic_metadata', {})
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("🔄 Iterations", metadata.get('reasoning_iterations', 0))
+        with col2:
+            tools_count = len(metadata.get('tools_used', []))
+            st.metric("🔧 Tools Used", tools_count)
+        with col3:
+            st.metric("⏱️ Mode", "ReAct")
+        with col4:
+            success_icon = "✅" if metadata.get('react_enabled') else "❌"
+            st.metric("Status", success_icon)
+        
         st.divider()
         
-        # Intent classification
-        if response.get('intent_classification'):
-            self.render_intent_classification(response['intent_classification'])
+        # ===== SECONDARY SECTION: Detailed Reasoning (Collapsible Tabs) =====
+        st.markdown("### 🔍 Detailed Analysis")
         
-        # Reasoning trace
-        st.divider()
-        if response.get('reasoning_trace'):
-            self.render_reasoning_trace(response['reasoning_trace'])
+        # Create tabs for different sections
+        tab1, tab2, tab3 = st.tabs(["📊 Intent & Metadata", "🧠 Reasoning Trace", "⚙️ Technical Details"])
         
-        # Final answer
-        st.divider()
-        self.render_final_answer(response.get('final_answer'))
+        with tab1:
+            # Intent classification
+            if response.get('intent_classification'):
+                st.markdown("#### 🎯 Intent Classification")
+                intent_data = response['intent_classification']
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Detected Intent", intent_data.get('intent', 'N/A'))
+                with col2:
+                    confidence = intent_data.get('confidence', 0)
+                    st.metric("Confidence", f"{confidence:.2%}")
+                with col3:
+                    learning_status = "✅ Active" if intent_data.get('learning_active') else "❌ Inactive"
+                    st.metric("Learning", learning_status)
+                
+                if intent_data.get('reasoning'):
+                    with st.expander("💡 Why this intent?"):
+                        st.write(intent_data['reasoning'])
+            
+            # Execution summary
+            st.markdown("#### 📈 Execution Summary")
+            if metadata:
+                summary_col1, summary_col2 = st.columns(2)
+                with summary_col1:
+                    st.write(f"**Total Reasoning Steps:** {metadata.get('total_steps', 'N/A')}")
+                    st.write(f"**Dynamic Routing:** {'Yes' if metadata.get('dynamic_routing') else 'No'}")
+                    st.write(f"**Learning Applied:** {'Yes' if metadata.get('learning_applied') else 'No'}")
+                with summary_col2:
+                    if metadata.get('tools_used'):
+                        st.write("**Tools Executed:**")
+                        for tool in metadata['tools_used']:
+                            st.write(f"  • {tool}")
         
-        # Metadata
-        if response.get('agentic_metadata'):
-            self.render_metadata(response['agentic_metadata'])
+        with tab2:
+            # Detailed reasoning trace
+            st.markdown("#### 🧠 Step-by-Step Reasoning Process")
+            st.caption("See how the ReAct agent thought through your query")
+            
+            if response.get('reasoning_trace'):
+                trace = response['reasoning_trace']
+                steps = trace.get('steps', [])
+                
+                if not steps:
+                    st.info("No reasoning steps recorded")
+                else:
+                    # Group steps by iteration
+                    current_iteration = 0
+                    iteration_steps = []
+                    
+                    for step in steps:
+                        step_iteration = step.get('iteration', current_iteration)
+                        if step_iteration != current_iteration:
+                            # Render previous iteration
+                            if iteration_steps:
+                                self._render_iteration_group(current_iteration, iteration_steps)
+                            # Start new iteration
+                            current_iteration = step_iteration
+                            iteration_steps = [step]
+                        else:
+                            iteration_steps.append(step)
+                    
+                    # Render last iteration
+                    if iteration_steps:
+                        self._render_iteration_group(current_iteration, iteration_steps)
+            else:
+                st.info("No reasoning trace available")
+        
+        with tab3:
+            # Technical details
+            st.markdown("#### ⚙️ Technical Execution Details")
+            
+            with st.expander("📋 Complete Metadata", expanded=False):
+                st.json(metadata)
+            
+            with st.expander("🔍 Raw Response Data", expanded=False):
+                st.json(response)
+    
+    def _render_iteration_group(self, iteration: int, steps: list):
+        """
+        Render a group of steps from a single iteration.
+        
+        Args:
+            iteration: Iteration number
+            steps: List of steps in this iteration
+        """
+        with st.expander(f"**Iteration {iteration + 1}**", expanded=(iteration < 2)):  # Auto-expand first 2 iterations
+            for step in steps:
+                step_type = step.get('step_type', '')
+                
+                if step_type == 'thought':
+                    self._render_thought_step(step)
+                elif step_type == 'action':
+                    self._render_action_step(step)
+                elif step_type == 'observation':
+                    self._render_observation_step(step)
+                elif step_type == 'final_answer':
+                    self._render_final_answer_step(step)
+                
+                # Add some spacing between steps
+                st.markdown("<br/>", unsafe_allow_html=True)

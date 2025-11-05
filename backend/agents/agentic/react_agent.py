@@ -243,6 +243,16 @@ class ReActAgent:
         # Build context from previous steps
         context_summary = trace.get_context_summary() if trace.steps else ""
         
+        # Add conversation history if available
+        conversation_history = context.get('conversation_history', [])
+        if conversation_history:
+            history_str = "\n\nConversation History:\n"
+            for msg in conversation_history[-4:]:  # Last 4 messages for context
+                role = msg.get('role', 'unknown')
+                content = msg.get('content', '')
+                history_str += f"{role.capitalize()}: {content}\n"
+            context_summary = history_str + "\n" + context_summary
+        
         # Create prompt using centralized config
         prompt = format_react_user_prompt(
             query=trace.query,
@@ -386,3 +396,8 @@ class ReActAgent:
             'tools_usage': tools_usage,
             'max_iterations_reached': sum(1 for t in self.reasoning_history if t.current_iteration >= t.max_iterations)
         }
+    
+    def reset_stats(self):
+        """Reset ReAct agent statistics."""
+        self.reasoning_history = []
+        logger.info("ReAct agent statistics reset")

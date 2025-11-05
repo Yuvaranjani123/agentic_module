@@ -13,7 +13,8 @@ from .react_agent import ReActAgent
 from .react_tools import (
     PremiumCalculatorTool,
     PolicyComparatorTool,
-    DocumentRetrieverTool
+    DocumentRetrieverTool,
+    ProductListTool
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ class AgenticSystem:
         
         # Create ReAct tools
         self.react_tools = {
+            'list_products': ProductListTool(),
             'premium_calculator': PremiumCalculatorTool(calculator),
             'policy_comparator': PolicyComparatorTool(comparator),
             'document_retriever': DocumentRetrieverTool(retriever)
@@ -59,7 +61,7 @@ class AgenticSystem:
         # Create ReAct agent (primary execution)
         self.react_agent = ReActAgent(llm, self.react_tools)
         
-        logger.info("ReAct Agentic System initialized with 3 tools")
+        logger.info("ReAct Agentic System initialized with 4 tools")
     
     def process_query(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -99,6 +101,7 @@ class AgenticSystem:
             'success': react_result['success'],
             'agentic_metadata': {
                 'reasoning_iterations': react_result['iterations'],
+                'total_steps': len(react_result['reasoning_trace'].get('steps', [])),
                 'tools_used': react_result['tools_used'],
                 'learning_applied': True,
                 'react_enabled': True,
@@ -163,3 +166,21 @@ class AgenticSystem:
                 for name, tool in self.react_tools.items()
             }
         }
+    
+    def reset_stats(self) -> Dict[str, str]:
+        """Reset all system statistics."""
+        logger.info("Resetting all system statistics")
+        
+        # Reset ReAct agent stats
+        self.react_agent.reset_stats()
+        
+        # Reset tool usage counts
+        for tool in self.react_tools.values():
+            tool.usage_count = 0
+        
+        # Reset classifier stats (if method exists)
+        if hasattr(self.classifier, 'reset_stats'):
+            self.classifier.reset_stats()
+        
+        logger.info("All statistics reset successfully")
+        return {'message': 'Statistics reset successfully'}

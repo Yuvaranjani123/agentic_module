@@ -208,17 +208,19 @@ def main():
         upload_mode = render_upload_mode_selector()
         
         # File Upload
-        if upload_mode == "Single PDF":
-            uploaded_file = st.file_uploader(
-                "Upload PDF Document",
-                type=['pdf'],
-                help="Upload the PDF document you want to process"
-            )
+        if upload_mode == "Single File (PDF/Excel)":
+            # Use the new single file uploader that handles both PDF and Excel
+            file_info = render_single_file_uploader(product_name)
             
-            # Document Type Selection (for single file)
-            if uploaded_file:
-                from components.ingestion.file_uploader import render_doc_type_selector
-                selected_doc_type = render_doc_type_selector()
+            # Extract file details
+            if file_info:
+                uploaded_file = file_info["uploaded_file"]
+                file_type = file_info["file_type"]
+                selected_doc_type = file_info["doc_type"]
+            else:
+                uploaded_file = None
+                file_type = None
+                selected_doc_type = "unknown"
         else:
             from components.ingestion.file_uploader import render_zip_file_uploader
             uploaded_zip = render_zip_file_uploader()
@@ -227,6 +229,7 @@ def main():
             handle_zip_upload_detection(uploaded_zip, base_output_dir)
             
             uploaded_file = None  # Will handle ZIP separately
+            file_type = None
             selected_doc_type = "unknown"  # Will be set per file during labeling
         
         # Use modularized UI components for chunking info and Azure status
@@ -239,8 +242,14 @@ def main():
         render_zip_upload_workflow(pipeline, uploaded_zip, base_output_dir, DJANGO_API)
     
     elif uploaded_file is not None:
-        # Use modularized PDF processing component
-        render_pdf_upload_workflow(pipeline, uploaded_file, selected_doc_type, base_output_dir)
+        # Handle Excel files differently from PDFs
+        if file_type == "excel":
+            # Use Excel processing workflow
+            from components.ingestion.excel_processor import render_excel_upload_workflow
+            render_excel_upload_workflow(uploaded_file, product_name, base_output_dir, DJANGO_API)
+        else:
+            # Use modularized PDF processing component
+            render_pdf_upload_workflow(pipeline, uploaded_file, selected_doc_type, base_output_dir)
     
     else:
         # Use modularized workflow overview component

@@ -6,6 +6,7 @@ This script provides convenient shortcuts for running different types of tests.
 
 Usage:
     python run_tests.py                    # Run all tests
+    python run_tests.py agents             # Run agents tests only (Traditional + ReAct)
     python run_tests.py ingestion          # Run ingestion tests only
     python run_tests.py retriever          # Run retriever tests only
     python run_tests.py --verbose          # Run with verbose output
@@ -85,7 +86,7 @@ def main():
         # Run all tests
         cmd = base_cmd
         description = "All Tests"
-    elif test_args[0] in ['ingestion', 'retriever', 'evaluation', 'logs']:
+    elif test_args[0] in ['agents', 'ingestion', 'retriever', 'evaluation', 'logs']:
         # Run specific app tests
         cmd = base_cmd + [test_args[0]]
         description = f"{test_args[0].capitalize()} Tests"
@@ -131,9 +132,10 @@ def main():
     if returncode != 0:
         print(f"{BOLD}Debugging Tips:{RESET}")
         print("  1. Run with --verbose for more details")
-        print("  2. Run specific test: python run_tests.py ingestion.tests.IngestionAPITests.test_upload_pdf_success")
-        print("  3. Check the error messages above for clues")
-        print("  4. Ensure all environment variables are set (check .env file)")
+        print("  2. Run specific test: python run_tests.py agents.tests.ReActAgenticTests.test_react_multi_step_query")
+        print("  3. Run specific module: python run_tests.py agents")
+        print("  4. Check the error messages above for clues")
+        print("  5. Ensure all environment variables are set (check .env file)")
         print()
     
     return returncode

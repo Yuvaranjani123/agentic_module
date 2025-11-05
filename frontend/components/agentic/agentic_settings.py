@@ -113,38 +113,62 @@ class AgenticSettings:
         """Render system statistics section."""
         st.header("📊 Statistics")
         
-        if st.button("🔄 Refresh Stats"):
-            stats = self._get_system_stats()
-            if stats and stats.get('success'):
-                st.session_state.stats = stats
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Refresh Stats", use_container_width=True):
+                stats = self._get_system_stats()
+                if stats and stats.get('success'):
+                    st.session_state.stats = stats
+        
+        with col2:
+            if st.button("🗑️ Reset Stats", use_container_width=True):
+                if self._reset_system_stats():
+                    st.success("✅ Statistics reset!")
+                    # Clear cached stats
+                    if 'stats' in st.session_state:
+                        del st.session_state.stats
+                    st.rerun()
         
         if 'stats' in st.session_state and st.session_state.stats:
             stats_data = st.session_state.stats.get('statistics', {})
             
-            # ReAct metrics
-            st.markdown("**ReAct System**")
-            react_stats = stats_data.get('react', {})
-            st.metric("Total Queries", react_stats.get('total_queries', 0))
-            st.metric("Avg Steps", f"{react_stats.get('avg_steps', 0):.1f}")
-            st.metric("Success Rate", f"{react_stats.get('success_rate', 0):.1%}")
+            # Use tabs for better organization
+            tab1, tab2, tab3 = st.tabs(["🤖 ReAct", "🧠 Learning", "🛠️ Tools"])
             
-            st.divider()
+            with tab1:
+                # ReAct metrics
+                st.markdown("**ReAct System**")
+                react_stats = stats_data.get('react', {})
+                st.metric("Total Queries", react_stats.get('total_queries', 0))
+                st.metric("Avg Steps", f"{react_stats.get('avg_steps', 0):.1f}")
+                st.metric("Success Rate", f"{react_stats.get('success_rate', 0):.1%}")
             
-            # Learning metrics
-            st.markdown("**Intent Learning**")
-            learning = st.session_state.stats.get('learning_evidence', {})
-            st.metric("Total Classifications", learning.get('total_interactions', 0))
-            st.metric("Patterns Learned", len(learning.get('patterns_learned', {})))
-            improvement = learning.get('accuracy_improvement', 0)
-            st.metric("Accuracy Improvement", f"{improvement:+.1%}")
+            with tab2:
+                # Learning metrics
+                st.markdown("**Intent Learning**")
+                learning = st.session_state.stats.get('learning_evidence', {})
+                st.metric("Total Classifications", learning.get('total_interactions', 0))
+                st.metric("Patterns Learned", len(learning.get('patterns_learned', {})))
+                improvement = learning.get('accuracy_improvement', 0)
+                st.metric("Accuracy Improvement", f"{improvement:+.1%}")
             
-            st.divider()
-            
-            # Tool usage
-            st.markdown("**Tool Usage**")
-            tools = st.session_state.stats.get('tool_usage', {})
-            for tool, count in tools.items():
-                st.metric(tool.replace('_', ' ').title(), count)
+            with tab3:
+                # Tool usage
+                st.markdown("**Tool Usage**")
+                tools = st.session_state.stats.get('tool_usage', {})
+                if tools:
+                    for tool_name, tool_data in tools.items():
+                        # Handle both dict and int formats
+                        if isinstance(tool_data, dict):
+                            count = tool_data.get('usage_count', 0)
+                        else:
+                            count = tool_data
+                        
+                        # Format tool name nicely
+                        display_name = tool_name.replace('_', ' ').title()
+                        st.metric(display_name, count)
+                else:
+                    st.info("No tool usage data yet")
         else:
             st.info("Click 'Refresh Stats' to load system statistics")
     
@@ -190,9 +214,20 @@ class AgenticSettings:
     def _get_system_stats(self):
         """Get system statistics from API."""
         try:
-            response = requests.get(f"{self.api_base}/api/agents/agentic/stats/", timeout=30)
+            response = requests.get(f"{self.api_base}/agents/agentic/stats/", timeout=30)
             response.raise_for_status()
             return response.json()
         except Exception as e:
             st.error(f"Error fetching stats: {str(e)}")
             return None
+    
+    def _reset_system_stats(self):
+        """Reset system statistics via API."""
+        try:
+            response = requests.post(f"{self.api_base}/agents/agentic/reset-stats/", timeout=30)
+            response.raise_for_status()
+            result = response.json()
+            return result.get('success', False)
+        except Exception as e:
+            st.error(f"Error resetting stats: {str(e)}")
+            return False

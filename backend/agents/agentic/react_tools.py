@@ -5,6 +5,8 @@ Wraps existing agents as tools for ReAct agent to use.
 
 import logging
 from typing import Dict, Any
+import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -12,14 +14,14 @@ logger = logging.getLogger(__name__)
 class ReActTool:
     """Base class for ReAct tools."""
     
-    def __init__(self, name: str, description: str, agent):
+    def __init__(self, name: str, description: str, agent=None):
         """
         Initialize tool.
         
         Args:
             name: Tool identifier
             description: What the tool does
-            agent: Underlying agent/component
+            agent: Underlying agent/component (optional for some tools)
         """
         self.name = name
         self.description = description
@@ -38,6 +40,58 @@ class ReActTool:
             Observation string for ReAct agent
         """
         raise NotImplementedError("Subclasses must implement execute()")
+
+
+class ProductListTool(ReActTool):
+    """Tool for listing available insurance products."""
+    
+    def __init__(self):
+        super().__init__(
+            name="list_products",
+            description="List all available insurance products in the system",
+            agent=None
+        )
+    
+    def execute(self, action_input: str, context: Dict[str, Any]) -> str:
+        """
+        List all available products.
+        
+        Args:
+            action_input: Empty JSON {} or any JSON
+            context: Execution context
+            
+        Returns:
+            Observation string with available products
+        """
+        self.usage_count += 1
+        logger.info(f"[ReAct Tool] Product Lister")
+        
+        try:
+            # Get project root (Django runs from backend/)
+            backend_dir = Path(__file__).parent.parent.parent
+            project_root = backend_dir.parent
+            base_dir = project_root / "media" / "output" / "chroma_db"
+            
+            if not base_dir.exists():
+                return "Error: No products available. ChromaDB directory not found."
+            
+            # List all product directories
+            available_products = [
+                d.name for d in base_dir.iterdir()
+                if d.is_dir() and (d / "chroma.sqlite3").exists()
+            ]
+            
+            if not available_products:
+                return "Error: No products available. Please run ingestion first."
+            
+            logger.info(f"Available products: {available_products}")
+            
+            return f"Available insurance products in the system: {', '.join(available_products)}. " \
+                   f"Total: {len(available_products)} products."
+        
+        except Exception as e:
+            logger.error(f"Product lister error: {e}", exc_info=True)
+            return f"Error listing products: {str(e)}"
 
 
 class PremiumCalculatorTool(ReActTool):
@@ -83,8 +137,31 @@ class PremiumCalculatorTool(ReActTool):
             if not members:
                 return "Error: members list is required with age information"
             
+            # CRITICAL FIX: Create product-specific calculator
+            # The shared calculator (self.agent) was initialized without doc_name,
+            # so it always uses the first workbook in registry (ActivAssure)
+            
+            # Dynamically load registry and find matching doc_name
+            doc_name = self._find_doc_name_for_policy(policy_name)
+            
+            if not doc_name:
+                # Get available products from registry
+                available_products = self._get_available_products()
+                return f"Error: Unknown policy '{policy_name}'. Available products: {', '.join(available_products)}"
+            
+            # Create product-specific calculator with the correct doc_name
+            try:
+                from agents.calculators import PremiumCalculator
+                product_calculator = PremiumCalculator(doc_name=doc_name)
+                logger.info(f"Created calculator for {policy_name} using doc_name '{doc_name}'")
+            except FileNotFoundError as e:
+                return f"Error: Premium data not available for {policy_name}. {str(e)}"
+            except Exception as e:
+                logger.error(f"Failed to create calculator for {policy_name}: {e}", exc_info=True)
+                return f"Error: Failed to load premium data for {policy_name}. {str(e)}"
+            
             # Call actual PremiumCalculator.calculate_premium()
-            result = self.agent.calculate_premium(
+            result = product_calculator.calculate_premium(
                 policy_type=policy_type,
                 members=members,
                 sum_insured=sum_insured,
@@ -108,6 +185,97 @@ class PremiumCalculatorTool(ReActTool):
         except Exception as e:
             logger.error(f"Premium calculator error: {e}", exc_info=True)
             return f"Error calculating premium: {str(e)}"
+    
+    def _find_doc_name_for_policy(self, policy_name: str) -> str:
+        """
+        Dynamically find registry doc_name for a policy name.
+        
+        Matches policy names like 'ActivAssure' to registry keys like 'activ_assure_premium_chart'.
+        
+        Args:
+            policy_name: Friendly policy name (e.g., 'ActivAssure', 'ActivFit')
+            
+        Returns:
+            Registry doc_name if found, None otherwise
+        """
+        import json
+        from pathlib import Path
+        
+        try:
+            # Load registry
+            backend_dir = Path(__file__).parent.parent.parent
+            project_root = backend_dir.parent
+            registry_path = project_root / "media" / "premium_workbooks" / "premium_workbooks_registry.json"
+            
+            if not registry_path.exists():
+                logger.error(f"Registry not found: {registry_path}")
+                return None
+            
+            with open(registry_path, 'r') as f:
+                registry = json.load(f)
+            
+            # Strategy 1: Exact match (case-insensitive)
+            policy_lower = policy_name.lower()
+            for doc_name in registry.keys():
+                if doc_name.lower() == policy_lower:
+                    logger.info(f"Exact match: {policy_name} -> {doc_name}")
+                    return doc_name
+            
+            # Strategy 2: Pattern matching (e.g., 'ActivAssure' -> 'activ_assure_premium_chart')
+            # Remove common suffixes/prefixes, convert to snake_case
+            normalized_policy = policy_lower.replace('activ', '').replace('_', '').replace('-', '')
+            
+            for doc_name in registry.keys():
+                normalized_doc = doc_name.lower().replace('activ', '').replace('_', '').replace('-', '').replace('premium', '').replace('chart', '')
+                
+                if normalized_policy in normalized_doc or normalized_doc in normalized_policy:
+                    logger.info(f"Pattern match: {policy_name} -> {doc_name}")
+                    return doc_name
+            
+            logger.warning(f"No registry match found for policy: {policy_name}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error finding doc_name for {policy_name}: {e}", exc_info=True)
+            return None
+    
+    def _get_available_products(self) -> list:
+        """
+        Get list of available product names from registry.
+        
+        Returns:
+            List of friendly product names
+        """
+        import json
+        from pathlib import Path
+        
+        try:
+            backend_dir = Path(__file__).parent.parent.parent
+            project_root = backend_dir.parent
+            registry_path = project_root / "media" / "premium_workbooks" / "premium_workbooks_registry.json"
+            
+            if not registry_path.exists():
+                return []
+            
+            with open(registry_path, 'r') as f:
+                registry = json.load(f)
+            
+            # Convert registry keys to friendly names
+            # e.g., 'activ_assure_premium_chart' -> 'ActivAssure'
+            products = []
+            for doc_name in registry.keys():
+                # Remove 'premium_chart' suffix
+                name = doc_name.replace('_premium_chart', '')
+                # Convert snake_case to PascalCase
+                name_parts = name.split('_')
+                friendly_name = ''.join(word.capitalize() for word in name_parts)
+                products.append(friendly_name)
+            
+            return products
+            
+        except Exception as e:
+            logger.error(f"Error getting available products: {e}", exc_info=True)
+            return []
 
 
 class PolicyComparatorTool(ReActTool):

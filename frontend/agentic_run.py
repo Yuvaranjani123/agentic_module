@@ -91,17 +91,26 @@ config = settings.render_sidebar()
 
 # Main content
 st.title("🤖 Insurance RAG - Agentic System")
-st.caption("Iterative Thought-Action-Observation reasoning with learning capabilities")
+st.caption("Advanced multi-step reasoning with transparent decision-making")
 
-st.info("""
-**ReAct Agentic System Features:**
-- 🧠 **Iterative Reasoning**: Thought-Action-Observation loop
-- 🔧 **Dynamic Tool Selection**: Chooses right tools based on reasoning
-- 📚 **Multi-Step Queries**: Handles complex, sequential tasks
-- 🎯 **Intent Learning**: Improves from user feedback
-- 👁️ **Full Transparency**: See complete reasoning process
-- 🎯 **Auto Product Detection**: Mention product name in query (e.g., "ActivFit") and agent auto-switches!
-""")
+# Expandable info section (not prominent)
+with st.expander("ℹ️ About the Agentic System", expanded=False):
+    st.markdown("""
+    **ReAct Agentic System Features:**
+    - 🧠 **Iterative Reasoning**: Thought-Action-Observation loop
+    - 🔧 **Dynamic Tool Selection**: Chooses right tools based on reasoning
+    - 📚 **Multi-Step Queries**: Handles complex, sequential tasks
+    - 🎯 **Intent Learning**: Improves from user feedback
+    - 👁️ **Full Transparency**: See complete reasoning process
+    - 🎯 **Auto Product Detection**: Mention product name in query (e.g., "ActivFit") and agent auto-switches!
+    
+    **Best for queries like:**
+    - "Calculate premium for age 35, then compare with ActivFit"
+    - "Find coverage details for diabetes, then calculate premium for age 45"
+    - "Compare premiums across all products and show the cheapest option"
+    """)
+
+st.info("💡 **Tip**: Ask complex questions that need multiple steps. The system will show you how it thinks!", icon="💡")
 
 # Query interface
 query, run_query, clear = query_interface.render_with_buttons()

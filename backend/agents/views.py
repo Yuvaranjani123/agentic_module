@@ -205,8 +205,9 @@ def agent_query(request):
             if chroma_db_dir:
                 chroma_base_dir = os.path.dirname(chroma_db_dir)
             else:
-                # Default to media/output/chroma_db
-                chroma_base_dir = os.path.join("media", "output", "chroma_db")
+                # Default to media/output/chroma_db using Django settings
+                from django.conf import settings
+                chroma_base_dir = os.path.join(settings.MEDIA_ROOT, "output", "chroma_db")
             
             comparison_agent = get_comparison_agent(chroma_base_dir)
             available_products = comparison_agent.get_available_products()
