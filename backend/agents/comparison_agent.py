@@ -76,6 +76,9 @@ class PolicyComparisonAgent:
         self.premium_comparator = PremiumComparator(premium_calculator)
         self.response_builder = ComparisonResponseBuilder(self.llm)
         
+        # Expose premium calculator for backward compatibility
+        self.premium_calculator = premium_calculator
+        
         logger.info(f"PolicyComparisonAgent initialized with {len(self.doc_comparator.get_available_products())} products")
     
     def get_available_products(self) -> List[str]:

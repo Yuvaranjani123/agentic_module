@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'retriever',
     'logs',
     'agents',  # Agentic retrieval system
+    'evaluation',  # Test framework and evaluation metrics
 ]
 
 MIDDLEWARE = [
@@ -125,7 +126,10 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+# MEDIA_ROOT should point to project root's media folder, not backend/media/
+# BASE_DIR = backend/ (Django app root)
+# We need to go up one level to reach rag_module/ (project root)
+MEDIA_ROOT = os.path.join(BASE_DIR.parent, 'media')
 MEDIA_URL = '/media/'
 
 # Default primary key field type
