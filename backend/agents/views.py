@@ -22,6 +22,216 @@ _orchestrator = None  # Singleton orchestrator
 _premium_calculator = None  # Singleton premium calculator
 
 
+# ==========================================
+# Helper Functions for Agent Query Routing
+# ==========================================
+
+def _format_premium_answer(result: dict, query_text: str) -> str:
+    """Format premium calculation result as human-readable answer."""
+    if result.get('error'):
+        return f"❌ Error calculating premium: {result['error']}"
+    
+    policy_type = result.get('policy_type', 'family_floater')
+    
+    if policy_type == 'family_floater':
+        answer = f"**Premium Calculation Result**\n\n"
+        answer += f"**Policy Type:** Family Floater\n"
+        answer += f"**Composition:** {result.get('composition', 'N/A')}\n"
+        answer += f"**Sum Insured:** ₹{result['sum_insured']:,}\n"
+        answer += f"**Eldest Age:** {result.get('eldest_age')} ({result.get('age_band', 'N/A')})\n\n"
+        answer += f"**Gross Premium:** ₹{result['gross_premium']:,.2f}\n"
+        answer += f"**GST ({result['gst_rate']*100:.0f}%):** ₹{result['gst_amount']:,.2f}\n"
+        answer += f"**Total Premium:** ₹{result['total_premium']:,.2f}"
+    else:
+        answer = f"**Premium Calculation Result**\n\n"
+        answer += f"**Policy Type:** Individual\n"
+        answer += f"**Sum Insured:** ₹{result['sum_insured']:,}\n\n"
+        for i, member_premium in enumerate(result['breakdown'], 1):
+            if member_premium.get('error'):
+                answer += f"Member {i}: Error - {member_premium['error']}\n"
+            else:
+                answer += f"Member {i}: Age {member_premium['age']} ({member_premium.get('age_band', 'N/A')}) - ₹{member_premium['premium']:,.2f}\n"
+        answer += f"\n**Gross Premium:** ₹{result['gross_premium']:,.2f}\n"
+        answer += f"**GST ({result['gst_rate']*100:.0f}%):** ₹{result['gst_amount']:,.2f}\n"
+        answer += f"**Total Premium:** ₹{result['total_premium']:,.2f}"
+    
+    return answer
+
+
+def _handle_premium_route(query_text: str, routing_decision: dict) -> Response:
+    """Handle premium calculator routing."""
+    calculator = get_premium_calculator()
+    orchestrator = get_orchestrator()
+    
+    # Extract parameters from query
+    params = orchestrator.extract_premium_params(query_text)
+    
+    # If we have sufficient info, calculate directly
+    if params.get('members') and params.get('sum_insured'):
+        members = [{'age': age} for age in params['members']]
+        policy_type = params.get('policy_type', 'family_floater')
+        
+        result = calculator.calculate_premium(
+            policy_type=policy_type,
+            members=members,
+            sum_insured=params['sum_insured']
+        )
+        
+        result['answer'] = _format_premium_answer(result, query_text)
+        result['agent'] = 'premium_calculator'
+        result['intent'] = routing_decision['intent']
+        result['query'] = query_text
+        
+        if params.get('composition'):
+            result['composition_description'] = params['composition']
+        
+        return Response(result, status=status.HTTP_200_OK)
+    else:
+        # Need more information
+        return Response({
+            'agent': 'premium_calculator',
+            'intent': routing_decision['intent'],
+            'query': query_text,
+            'answer': "I can help you calculate the premium! I need:\n\n"
+                      "1. **Ages** of all members to be insured\n"
+                      "2. **Sum insured** (coverage amount like 2L, 5L, 10L)\n"
+                      "3. **Policy type**: Individual or Family Floater\n\n"
+                      "For family floater, please mention composition like '2 Adults + 1 Child'.\n\n"
+                      "Example: 'Calculate premium for 2 adults aged 35 and 40 with 1 child aged 7, sum insured 10L'",
+            'missing_params': ['members', 'sum_insured'] if not params.get('members') else ['sum_insured'],
+            'extracted_params': params
+        }, status=status.HTTP_200_OK)
+
+
+def _handle_comparison_route(query_text: str, routing_decision: dict, chroma_db_dir: str, k: int) -> Response:
+    """Handle comparison agent routing."""
+    # Get chroma base directory
+    if chroma_db_dir:
+        chroma_base_dir = os.path.dirname(chroma_db_dir)
+    else:
+        from django.conf import settings
+        chroma_base_dir = os.path.join(settings.MEDIA_ROOT, "output", "chroma_db")
+    
+    comparison_agent = get_comparison_agent(chroma_base_dir)
+    orchestrator = get_orchestrator()
+    available_products = comparison_agent.get_available_products()
+    
+    if len(available_products) < 2:
+        return Response({
+            'agent': 'comparison',
+            'intent': routing_decision['intent'],
+            'query': query_text,
+            'answer': f"I need at least 2 insurance products to make a comparison. Currently, I only have access to: {available_products}.\n\n"
+                      f"Please ingest more products using the Ingestion interface with different product names.",
+            'available_products': available_products,
+            'error': 'insufficient_products'
+        }, status=status.HTTP_200_OK)
+    
+    # Extract comparison parameters
+    params = orchestrator.extract_comparison_params(query_text, available_products)
+    products_to_compare = params.get('products')
+    
+    if not products_to_compare or len(products_to_compare) < 2:
+        products_to_compare = available_products
+    
+    aspects = params.get('aspects')
+    
+    # Check if premium calculation is needed
+    premium_keywords = ['premium', 'cost', 'price', 'how much', 'expensive', 'cheaper', 'affordable']
+    needs_premium_calc = any(keyword in query_text.lower() for keyword in premium_keywords)
+    
+    if needs_premium_calc and comparison_agent.premium_calculator:
+        logger.info("Premium comparison detected - attempting to extract parameters")
+        premium_params = orchestrator.extract_premium_params(query_text)
+        
+        if premium_params.get('members') and premium_params.get('sum_insured'):
+            members = [{'age': age} for age in premium_params['members']]
+            result = comparison_agent.compare_with_premium_calculation(
+                query=query_text,
+                product_names=products_to_compare,
+                premium_params={
+                    'policy_type': premium_params.get('policy_type', 'family_floater'),
+                    'members': members,
+                    'sum_insured': premium_params['sum_insured']
+                },
+                k=k
+            )
+        else:
+            return Response({
+                'agent': 'comparison',
+                'intent': routing_decision['intent'],
+                'query': query_text,
+                'answer': f"I can compare premiums for {', '.join(products_to_compare)}!\n\n"
+                          "To calculate and compare premiums, I need:\n\n"
+                          "1. **Ages** of all members to be insured\n"
+                          "2. **Sum insured** (coverage amount like 2L, 5L, 10L)\n"
+                          "3. **Policy type**: Individual or Family Floater\n\n"
+                          "Example: 'Compare premiums for 2 adults aged 35 and 40 with 5L cover'",
+                'products_to_compare': products_to_compare,
+                'missing_params': ['members', 'sum_insured'],
+                'available_products': available_products
+            }, status=status.HTTP_200_OK)
+    else:
+        # Regular document-based comparison
+        if not aspects:
+            result = comparison_agent.quick_compare(products_to_compare, k=k)
+        else:
+            result = comparison_agent.compare_products(products_to_compare, aspects, k=k)
+    
+    if result.get('success'):
+        response_data = {
+            'agent': 'comparison',
+            'intent': routing_decision['intent'],
+            'query': query_text,
+            'answer': result['comparison'],
+            'products_compared': result.get('products', products_to_compare),
+            'aspects': result.get('aspects', aspects) if aspects else result.get('aspects'),
+            'available_products': available_products,
+            'comparison_type': 'with_premiums' if result.get('includes_premiums') else 'document_only'
+        }
+        
+        if result.get('includes_premiums'):
+            response_data['premium_calculations'] = result.get('premium_calculations')
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+    else:
+        return Response({
+            'agent': 'comparison',
+            'intent': routing_decision['intent'],
+            'query': query_text,
+            'answer': f"I encountered an error while comparing: {result.get('error')}",
+            'error': result.get('error'),
+            'available_products': available_products
+        }, status=status.HTTP_200_OK)
+
+
+def _handle_retrieval_route(query_text: str, routing_decision: dict, chroma_db_dir: str, 
+                            k: int, doc_type_filter: str, exclude_doc_types: list, 
+                            evaluate_retrieval: bool, conversation_id: str) -> Response:
+    """Handle retrieval agent routing."""
+    if not chroma_db_dir:
+        logger.warning("Missing 'chroma_db_dir' parameter for retrieval")
+        return Response({"error": "chroma_db_dir is required for document queries"}, 
+                       status=status.HTTP_400_BAD_REQUEST)
+    
+    agent = get_or_create_agent(chroma_db_dir=chroma_db_dir, conversation_id=conversation_id)
+    
+    result = agent.query(
+        query_text=query_text,
+        k=k,
+        doc_type_filter=doc_type_filter,
+        exclude_doc_types=exclude_doc_types,
+        evaluate_retrieval=evaluate_retrieval,
+        conversation_id=conversation_id
+    )
+    
+    result['agent'] = 'retrieval'
+    result['intent'] = routing_decision['intent']
+    
+    logger.info("Retrieval agent query completed successfully")
+    return Response(result, status=status.HTTP_200_OK)
+
+
 def get_or_create_agent(chroma_db_dir: str, conversation_id: str = None):
     """
     Get existing agent session or create new one.
@@ -98,15 +308,15 @@ def agent_query(request):
     Orchestrated agent query endpoint with intelligent routing.
     Routes queries to appropriate specialized agent:
     - Premium calculation queries → PremiumCalculator
+    - Comparison queries → PolicyComparisonAgent
     - Document/policy queries → RetrievalAgent
-    
-    Supports conversation memory for retrieval agent.
     """
     try:
+        # Extract parameters
         query_text = request.data.get("query")
         chroma_db_dir = request.data.get("chroma_db_dir")
         k = request.data.get("k", 5)
-        doc_type_filter = request.data.get("doc_type")  
+        doc_type_filter = request.data.get("doc_type")
         exclude_doc_types = request.data.get("exclude_doc_types")
         evaluate_retrieval = request.data.get("evaluate", False)
         conversation_id = request.data.get("conversation_id")
@@ -130,209 +340,18 @@ def agent_query(request):
         
         logger.info(f"Routing decision: {routing_decision['agent']} (intent: {routing_decision['intent']})")
         
-        # Route to premium calculator
+        # Route to appropriate handler
         if routing_decision['agent'] == 'premium_calculator':
-            calculator = get_premium_calculator()
-            
-            # Extract parameters from query
-            params = orchestrator.extract_premium_params(query_text)
-            
-            # If we have sufficient info, calculate directly
-            if params.get('members') and params.get('sum_insured'):
-                members = [{'age': age} for age in params['members']]
-                policy_type = params.get('policy_type', 'family_floater')  # Default to family_floater if not specified
-                
-                result = calculator.calculate_premium(
-                    policy_type=policy_type,
-                    members=members,
-                    sum_insured=params['sum_insured']
-                )
-                
-                # Format answer for frontend
-                if result.get('error'):
-                    answer = f"❌ Error calculating premium: {result['error']}"
-                else:
-                    # Build human-readable answer
-                    if policy_type == 'family_floater':
-                        answer = f"**Premium Calculation Result**\n\n"
-                        answer += f"**Policy Type:** Family Floater\n"
-                        answer += f"**Composition:** {result.get('composition', 'N/A')}\n"
-                        answer += f"**Sum Insured:** ₹{result['sum_insured']:,}\n"
-                        answer += f"**Eldest Age:** {result.get('eldest_age')} ({result.get('age_band', 'N/A')})\n\n"
-                        answer += f"**Gross Premium:** ₹{result['gross_premium']:,.2f}\n"
-                        answer += f"**GST ({result['gst_rate']*100:.0f}%):** ₹{result['gst_amount']:,.2f}\n"
-                        answer += f"**Total Premium:** ₹{result['total_premium']:,.2f}"
-                    else:
-                        answer = f"**Premium Calculation Result**\n\n"
-                        answer += f"**Policy Type:** Individual\n"
-                        answer += f"**Sum Insured:** ₹{result['sum_insured']:,}\n\n"
-                        for i, member_premium in enumerate(result['breakdown'], 1):
-                            if member_premium.get('error'):
-                                answer += f"Member {i}: Error - {member_premium['error']}\n"
-                            else:
-                                answer += f"Member {i}: Age {member_premium['age']} ({member_premium.get('age_band', 'N/A')}) - ₹{member_premium['premium']:,.2f}\n"
-                        answer += f"\n**Gross Premium:** ₹{result['gross_premium']:,.2f}\n"
-                        answer += f"**GST ({result['gst_rate']*100:.0f}%):** ₹{result['gst_amount']:,.2f}\n"
-                        answer += f"**Total Premium:** ₹{result['total_premium']:,.2f}"
-                
-                result['answer'] = answer
-                result['agent'] = 'premium_calculator'
-                result['intent'] = routing_decision['intent']
-                result['query'] = query_text
-                # Add composition info from params for display (not calculation)
-                if params.get('composition'):
-                    result['composition_description'] = params['composition']
-                return Response(result, status=status.HTTP_200_OK)
-            else:
-                # Need more information
-                return Response({
-                    'agent': 'premium_calculator',
-                    'intent': routing_decision['intent'],
-                    'query': query_text,
-                    'answer': "I can help you calculate the premium! I need:\n\n"
-                              "1. **Ages** of all members to be insured\n"
-                              "2. **Sum insured** (coverage amount like 2L, 5L, 10L)\n"
-                              "3. **Policy type**: Individual or Family Floater\n\n"
-                              "For family floater, please mention composition like '2 Adults + 1 Child'.\n\n"
-                              "Example: 'Calculate premium for 2 adults aged 35 and 40 with 1 child aged 7, sum insured 10L'",
-                    'missing_params': ['members', 'sum_insured'] if not params.get('members') else ['sum_insured'],
-                    'extracted_params': params
-                }, status=status.HTTP_200_OK)
+            return _handle_premium_route(query_text, routing_decision)
         
-        # Route to comparison agent
         elif routing_decision['agent'] == 'comparison':
-            # Get chroma base directory (parent of all product databases)
-            if chroma_db_dir:
-                chroma_base_dir = os.path.dirname(chroma_db_dir)
-            else:
-                # Default to media/output/chroma_db using Django settings
-                from django.conf import settings
-                chroma_base_dir = os.path.join(settings.MEDIA_ROOT, "output", "chroma_db")
-            
-            comparison_agent = get_comparison_agent(chroma_base_dir)
-            available_products = comparison_agent.get_available_products()
-            
-            if len(available_products) < 2:
-                return Response({
-                    'agent': 'comparison',
-                    'intent': routing_decision['intent'],
-                    'query': query_text,
-                    'answer': f"I need at least 2 insurance products to make a comparison. Currently, I only have access to: {available_products}.\n\n"
-                              f"Please ingest more products using the Ingestion interface with different product names.",
-                    'available_products': available_products,
-                    'error': 'insufficient_products'
-                }, status=status.HTTP_200_OK)
-            
-            # Extract comparison parameters
-            params = orchestrator.extract_comparison_params(query_text, available_products)
-            
-            # Determine which products to compare
-            products_to_compare = params.get('products')
-            if not products_to_compare or len(products_to_compare) < 2:
-                products_to_compare = available_products  # Compare all if not specified
-            
-            # Initialize aspects variable (may be used later)
-            aspects = params.get('aspects')
-            
-            # Check if query mentions premium/cost/price - indicates need for premium calculation
-            premium_keywords = ['premium', 'cost', 'price', 'how much', 'expensive', 'cheaper', 'affordable']
-            needs_premium_calc = any(keyword in query_text.lower() for keyword in premium_keywords)
-            
-            # If premium calculation is needed, try to extract premium params
-            if needs_premium_calc and comparison_agent.premium_calculator:
-                logger.info("Premium comparison detected - attempting to extract parameters")
-                premium_params = orchestrator.extract_premium_params(query_text)
-                
-                # If we have sufficient params, do premium comparison
-                if premium_params.get('members') and premium_params.get('sum_insured'):
-                    members = [{'age': age} for age in premium_params['members']]
-                    result = comparison_agent.compare_with_premium_calculation(
-                        query=query_text,
-                        product_names=products_to_compare,
-                        premium_params={
-                            'policy_type': premium_params.get('policy_type', 'family_floater'),
-                            'members': members,
-                            'sum_insured': premium_params['sum_insured']
-                        },
-                        k=k
-                    )
-                else:
-                    # Missing params - ask for them
-                    return Response({
-                        'agent': 'comparison',
-                        'intent': routing_decision['intent'],
-                        'query': query_text,
-                        'answer': f"I can compare premiums for {', '.join(products_to_compare)}!\n\n"
-                                  "To calculate and compare premiums, I need:\n\n"
-                                  "1. **Ages** of all members to be insured\n"
-                                  "2. **Sum insured** (coverage amount like 2L, 5L, 10L)\n"
-                                  "3. **Policy type**: Individual or Family Floater\n\n"
-                                  "Example: 'Compare premiums for 2 adults aged 35 and 40 with 5L cover'",
-                        'products_to_compare': products_to_compare,
-                        'missing_params': ['members', 'sum_insured'],
-                        'available_products': available_products
-                    }, status=status.HTTP_200_OK)
-            else:
-                # Regular document-based comparison
-                if not aspects:
-                    # Use default quick comparison
-                    result = comparison_agent.quick_compare(products_to_compare, k=k)
-                else:
-                    # Use specific aspects
-                    result = comparison_agent.compare_products(products_to_compare, aspects, k=k)
-            
-            if result.get('success'):
-                response_data = {
-                    'agent': 'comparison',
-                    'intent': routing_decision['intent'],
-                    'query': query_text,
-                    'answer': result['comparison'],
-                    'products_compared': result.get('products', products_to_compare),
-                    'aspects': result.get('aspects', aspects) if aspects else result.get('aspects'),
-                    'available_products': available_products
-                }
-                
-                # Add premium info if calculated
-                if result.get('includes_premiums'):
-                    response_data['premium_calculations'] = result.get('premium_calculations')
-                    response_data['comparison_type'] = 'with_premiums'
-                else:
-                    response_data['comparison_type'] = 'document_only'
-                
-                return Response(response_data, status=status.HTTP_200_OK)
-            else:
-                return Response({
-                    'agent': 'comparison',
-                    'intent': routing_decision['intent'],
-                    'query': query_text,
-                    'answer': f"I encountered an error while comparing: {result.get('error')}",
-                    'error': result.get('error'),
-                    'available_products': available_products
-                }, status=status.HTTP_200_OK)
+            return _handle_comparison_route(query_text, routing_decision, chroma_db_dir, k)
         
-        # Route to retrieval agent
-        else:
-            if not chroma_db_dir:
-                logger.warning("Missing 'chroma_db_dir' parameter for retrieval")
-                return Response({"error": "chroma_db_dir is required for document queries"}, 
-                              status=status.HTTP_400_BAD_REQUEST)
-            
-            agent = get_or_create_agent(chroma_db_dir=chroma_db_dir, conversation_id=conversation_id)
-            
-            result = agent.query(
-                query_text=query_text,
-                k=k,
-                doc_type_filter=doc_type_filter,
-                exclude_doc_types=exclude_doc_types,
-                evaluate_retrieval=evaluate_retrieval,
-                conversation_id=conversation_id
+        else:  # retrieval
+            return _handle_retrieval_route(
+                query_text, routing_decision, chroma_db_dir, k, 
+                doc_type_filter, exclude_doc_types, evaluate_retrieval, conversation_id
             )
-            
-            result['agent'] = 'retrieval'
-            result['intent'] = routing_decision['intent']
-            
-            logger.info("Retrieval agent query completed successfully")
-            return Response(result, status=status.HTTP_200_OK)
         
     except Exception as e:
         logger.error(f"Error in orchestrated agent_query: {e}", exc_info=True)
